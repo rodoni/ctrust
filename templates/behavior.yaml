@@ -1,0 +1,57 @@
+version: 1
+kind: c-behavior
+slice: SLICE_ID
+status: draft
+
+source:
+  project_root: ""
+  component: ""
+  files:
+    - path: "src/source.c"
+      lines: "1-1"
+  functions:
+    - c_name: FUNCTION_NAME
+      definition: "src/source.c:1"
+      rust_name: ""
+
+inputs: []
+outputs:
+  success: []
+  errors: []
+
+control_flow:
+  - step: 1
+    source: "src/source.c:1"
+    action: "Describe the observed operation"
+    condition: ""
+    then: ""
+    else: ""
+
+calls: []
+state:
+  reads: []
+  writes: []
+  global_state: []
+
+side_effects: []
+memory:
+  allocation: []
+  ownership: []
+
+behavior_cases:
+  - id: normal-case
+    input: ""
+    expected: ""
+    evidence: ""
+
+open_questions: []
+differences_allowed: []
+evidence: []
+
+completion:
+  source_logic_read: false
+  branches_mapped: false
+  calls_mapped: false
+  errors_mapped: false
+  side_effects_mapped: false
+  test_cases_defined: false

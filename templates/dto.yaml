@@ -1,0 +1,22 @@
+version: 1
+kind: message-dto
+slice: SLICE_ID
+status: draft
+message:
+  name: MESSAGE_NAME
+  version: 1
+  subject: ""
+  message_id: required
+fields: []
+source_structures: []
+serialization:
+  format: json
+  serde_feature: transport_only
+validation:
+  required_fields: []
+  invariants: []
+  errors: []
+domain_mapping:
+  domain_type: ""
+  mapper: ""
+  omitted_fields: []

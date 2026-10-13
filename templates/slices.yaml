@@ -1,0 +1,58 @@
+version: 1
+unit: UNIT_NAME
+status: planned
+
+slices:
+  - id: UNIT_NAME-001
+    order: 1
+    status: planned
+    objective: "Describe one business behavior"
+    source:
+      headers: []
+      functions:
+        - c_name: FUNCTION_NAME
+          rust_name: ""
+          declaration_file: ""
+          declaration_line: null
+      files: []
+      symbols: []
+      includes: []
+    include: []
+    exclude:
+      - "platform infrastructure not required by the business behavior"
+    dependencies:
+      # IDs de slices que este slice chama ou requer; devem formar um DAG.
+      # order é apenas desempate humano, não substitui dependencies.
+      - id: ""
+        kind: slice
+        relation: calls
+        reason: ""
+        required_status: verified
+        blocking: true
+    infrastructure:
+      port: []
+      adapt: []
+      simulate: []
+      exclude: []
+    target:
+      workspace_root: ""
+      path: ""
+      crate_name: ""
+      workspace_member: true
+      output_kind: library
+    prerequisites: []
+    characterization_tests: []
+    completion_criteria: []
+    artifacts:
+      inventory: inventory/slices/UNIT_NAME-001/
+      data_structures: inventory/slices/UNIT_NAME-001/data-structures.yaml
+      behavior: inventory/slices/UNIT_NAME-001/behavior.yaml
+      call_graph: inventory/call-graph.yaml
+      callers: inventory/slices/UNIT_NAME-001/callers.yaml
+      dependencies: inventory/slices/UNIT_NAME-001/dependencies.yaml
+      contract: contracts/units/UNIT_NAME-001.yaml
+      model: plans/units/UNIT_NAME-001-model.yaml
+      checkpoint: checkpoints/UNIT_NAME-001-<stage>.md
+
+# Process slices in order. Each slice must complete:
+# data-structures -> behavior -> contract -> model -> port -> verify before the next slice starts.

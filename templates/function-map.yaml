@@ -1,0 +1,48 @@
+version: 2
+slice: SLICE_ID
+status: planned
+revision: 1
+units: []
+next_function: ""
+
+organization:
+  schema: 1
+  naming_rule: semantic-v1
+  implementation_file: "src/<slice-name>.rs"
+  test_file: "tests/<slice-name>_integration.rs"
+  unit_test_file: "src/<slice-name>.rs"
+  integration_test_file: "tests/<slice-name>_integration.rs"
+  module_path: "crate::<slice-name>"
+  shared_type_references: []
+  public_reexports: []
+
+functions:
+  - c_name: FUNCTION_NAME
+    function_id: "c:source/file.c:42:FUNCTION_NAME"
+    c_header: "source/header.h"
+    c_declaration_line: null
+    c_definition: "source/file.c:42"
+    rust_name: "rust_function_name"
+    rust_path: "crate::module::rust_function_name"
+    rust_file: "crates/domain/src/parser.rs"
+    contract: "C-CONTRACT-001"
+    module_path: "crate::parser"
+    unit_id: ""
+    unit_role: member
+    source_mapping_revision: 1
+    implementation_status: pending
+    test_status: pending
+    comparison_status: pending
+    legacy_reference:
+      available: false
+      tests_available: false
+      executable_harness_available: false
+      reason: ""
+    verification_scope: pending
+    state: planned
+    evidence_refs: []
+    do_not_repeat: ""
+    origin_comment: "// ctrust:source file=source/file.c line=42 symbol=FUNCTION_NAME slice=SLICE_ID contract=C-CONTRACT-001"
+    notes: ""
+
+# Every function declared in source.functions must have one mapping row.

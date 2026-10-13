@@ -1,0 +1,75 @@
+version: 1
+kind: c-data-structures
+slice: SLICE_ID
+status: draft
+no_structures: false
+
+source:
+  project_root: ""
+  headers: []
+  files: []
+
+structures:
+  - c_name: STRUCT_NAME
+    kind: struct
+    declaration: "src/types.h:1"
+    typedef_name: ""
+    used_by_functions: []
+    mapping:
+      message_dto: ""
+      domain: ""
+      strategy: unresolved
+      exclusion_reason: ""
+    fields:
+      - name: field_name
+        c_type: "int"
+        pointer_depth: 0
+        array_length: null
+        nullable: false
+        ownership: value
+        shared_memory: false
+        synchronization: none
+        declaration: "src/types.h:2"
+        mapping:
+          message_dto: ""
+          domain: ""
+          strategy: unresolved
+          exclusion_reason: ""
+    layout:
+      size: unknown
+      alignment: unknown
+      packing: default
+      repr_c_required: true
+    pointer_semantics:
+      points_to: ""
+      aliasing: ""
+      lifetime: ""
+      ownership_transfer: ""
+    shared_memory:
+      used: false
+      mechanism: none
+      offset_based: false
+      process_shared: false
+      synchronization: []
+      portability_decision: adapt
+    rust_strategy:
+      type: ""
+      module_path: ""
+      ownership: ""
+      lifetime: ""
+      repr: ""
+      unsafe_boundary: ""
+      adapter_or_simulation: ""
+    evidence: []
+    open_questions: []
+
+dependencies: []
+
+completion:
+  structures_identified: false
+  fields_mapped: false
+  layout_mapped: false
+  pointer_semantics_mapped: false
+  shared_memory_classified: false
+  rust_strategy_defined: false
+  evidence_recorded: false

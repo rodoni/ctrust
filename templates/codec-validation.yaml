@@ -1,0 +1,21 @@
+version: 1
+kind: message-codec-validation
+slice: SLICE_ID
+status: draft
+message_versions:
+  supported: [1]
+  reject_unknown: true
+codec:
+  format: json
+  decode_before_mapper: true
+  preserve_subject: true
+  preserve_message_id: true
+validation:
+  required_fields: []
+  schema_rules: []
+  invariant_rules: []
+mapper:
+  explicit_name: ""
+  dto_type: ""
+  domain_type: ""
+  rejects_invalid_before_domain: true

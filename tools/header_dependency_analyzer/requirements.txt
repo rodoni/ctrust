@@ -1,0 +1,4 @@
+-r ../requirements.txt
+tree-sitter==0.23.2
+tree-sitter-c==0.21.4
+networkx>=3.0

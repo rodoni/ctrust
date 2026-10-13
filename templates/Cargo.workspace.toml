@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = [
+    # Add every Rust crate created for the migration here.
+    # Example: "crates/domain-core"
+]
+
+[workspace.package]
+edition = "2021"
+
+[workspace.dependencies]
+# Keep shared dependency versions here when multiple crates need them.
