@@ -17,6 +17,7 @@ fi
 
 cd "$ROOT"
 TOOL_ROOT="${SCRIPT_DIR%/scripts}/tools"
+"$SCRIPT_DIR/inventory-gate.sh" "$ROOT" "$SCOPE"
 PYTHONPATH="$TOOL_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 -m workflow gate "$ROOT" prerequisites "$SCOPE"
 "$SCRIPT_DIR/function-recovery-gate.sh" "$ROOT" "$SCOPE"
 "$SCRIPT_DIR/dependency-architecture-gate.sh" "$ROOT"

@@ -6,7 +6,26 @@ from dataclasses import replace
 from .core import CtrustOrganizer
 from .models import FunctionInput, OrganizationInput, SliceInput
 from .serializers import plan_to_dict
-from workflow import WorkflowError, load, save, manifests
+from workflow import WorkflowError, load, save, manifests, require_inventory, require_action
+
+
+def differences(actual, expected, prefix=''):
+    if isinstance(actual, dict) and isinstance(expected, dict):
+        for key in sorted(actual.keys() | expected.keys(), key=str):
+            field = f'{prefix}.{key}' if prefix else str(key)
+            if key not in actual:
+                yield f'{field}: missing; expected {expected[key]!r}'
+            elif key not in expected:
+                yield f'{field}: unexpected field'
+            else:
+                yield from differences(actual[key], expected[key], field)
+    elif isinstance(actual, list) and isinstance(expected, list):
+        if len(actual) != len(expected):
+            yield f'{prefix}: expected {len(expected)} items, observed {len(actual)}'
+        for index, (left, right) in enumerate(zip(actual, expected)):
+            yield from differences(left, right, f'{prefix}[{index}]')
+    elif type(actual) is not type(expected) or actual != expected:
+        yield f'{prefix}: expected {expected!r}, observed {actual!r}'
 
 
 def build_plan(project, sid=''):
@@ -16,6 +35,7 @@ def build_plan(project, sid=''):
     sid = sid or state.get('current_unit')
     if sid not in entries:
         raise WorkflowError('No active slice; reconcile first or pass --slice')
+    require_inventory(root, sid)
     selected, manifest, manifest_data = entries[sid]
     target = selected.get('target', {})
     path = target.get('path') or state.get('target', {}).get('path') or state.get('target', {}).get('project_root') or str(project)
@@ -53,10 +73,26 @@ def validate_persisted(project, sid=''):
     root = project / '.ctrust'
     sid = sid or load(root / 'migration.yaml').get('current_unit')
     path = root / f'plans/units/{sid}-organization.yaml'
-    actual = load(path if path.exists() else root / 'plans/units/organization.yaml')
+    path = path if path.exists() else root / 'plans/units/organization.yaml'
+    actual = load(path)
     expected = plan_to_dict(plan)
-    if actual != expected:
-        raise WorkflowError('Organization plan is stale or invalid; regenerate with organize after reviewing input changes')
+    changed = list(differences(actual, expected))
+    if changed:
+        raise WorkflowError(f'{path}: Organization plan is stale or invalid; regenerate with organize after reviewing input changes: ' + '; '.join(changed))
+    return plan
+
+
+def write_plan(project, sid=''):
+    root = project / '.ctrust'
+    state = load(root / 'migration.yaml')
+    sid = sid or state.get('current_unit')
+    require_action(root, state, sid, 'organize')
+    plan = build_plan(project, sid)
+    errors = CtrustOrganizer().validate(plan)
+    if errors:
+        raise WorkflowError('; '.join(f'{e.owner}: {e.rule}' for e in errors))
+    save(root, root / 'plans/units/organization.yaml', plan_to_dict(plan))
+    save(root, root / f'plans/units/{sid}-organization.yaml', plan_to_dict(plan))
     return plan
 
 
@@ -75,13 +111,7 @@ def main():
             plan = build_plan(project, args.slice)
             if args.unit and plan.unit != args.unit:
                 raise WorkflowError(f'Unit not found: {args.unit}')
-            errors = CtrustOrganizer().validate(plan)
-            if errors:
-                raise WorkflowError('; '.join(f'{e.owner}: {e.rule}' for e in errors))
-            root = project / '.ctrust'
-            save(root, root / 'plans/units/organization.yaml', plan_to_dict(plan))
-            sid = args.slice or load(root / 'migration.yaml').get('current_unit')
-            save(root, root / f'plans/units/{sid}-organization.yaml', plan_to_dict(plan))
+            plan = write_plan(project, args.slice)
             print('organization plan written')
         print(f'organization valid: {len(plan.slices)} slices')
         return 0

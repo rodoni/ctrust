@@ -20,6 +20,8 @@ Para cada slice, comece pelos headers declarados em `source.headers` e pelas fun
 5. Não avance o slice para `contract-extraction` enquanto uma dependência obrigatória estiver ausente, salvo decisão explícita de simulação, adaptação ou exclusão.
 6. Execute o analisador determinístico para cada slice, usando todos os headers de entrada declarados:
 
+   Prefira `.ctrust/sync.sh inventory . "$SLICE_ID"`: o controlador deriva os argumentos do manifesto, valida a elegibilidade e publica transacionalmente o inventário. O comando registra falhas de execução; não contabilize a mesma falha novamente com `failed`. O comando direto abaixo serve para investigação explícita. A exportação usa staging, valida o conjunto completo e arquiva a versão anterior na troca; não substitua análises revisadas sem verificar a necessidade e preservar as decisões.
+
    ```bash
    python3 .ctrust/tools/header_dependency_analyzer/export_inventory.py \
      --project "$SOURCE_PROJECT_ROOT" \
@@ -34,7 +36,7 @@ Para cada slice, comece pelos headers declarados em `source.headers` e pelas fun
    ```
 
    Passe um `--function` para cada item de `source.functions`; essa seleção define as raízes do slice. Sem `--function`, o analyzer usa todas as declarações do header como raízes, o que pode incluir funções fora do escopo. Se houver `compile_commands.json`, passe `--compile-commands`; flags são registradas como metadata e a análise ainda não executa o pré-processador. Repita `--header` para todos os headers de entrada do slice. O cache é opcional e pode ser reutilizado entre sessões.
-7. Localize cada função C alvo, confirme seu símbolo e linha e valide o nome Rust correspondente.
+7. Execute `.ctrust/scripts/inventory-gate.sh . "$SLICE_ID"` depois da exportação. O gate exige os nove artefatos determinísticos, incluindo `behavior.yaml`, e informa arquivos ou campos faltantes/inválidos. Se falhar, complete o inventário antes de avançar; preserve análises enriquecidas ou confirmadas antes de reexportar. Depois localize cada função C alvo, confirme seu símbolo e linha e valide o nome Rust correspondente.
 8. Use o `header_dependency_analyzer` como fonte normativa dos callers/callees diretos e das dependências transitivas.
 9. Execute `call-graph-cscope.sh` apenas quando houver necessidade explícita de investigar chamadas indiretas, callbacks, ponteiros de função, macros ou callers reversos. O resultado é complementar e não substitui os YAMLs do analyzer.
 10. Para cada slice, relacione chamadas com evidência `arquivo:linha`, classifique a aresta como `direct`, `callback`, `function_pointer`, `macro` ou `unresolved` e registre chamadas indiretas como risco.

@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import fcntl
 import os
 import socket
 import tempfile
@@ -20,21 +21,30 @@ class WorkspaceLock:
     def __enter__(self):
         self.lock_dir.mkdir(parents=True, exist_ok=True)
         try:
-            self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            # Keep the lock inode stable. The kernel releases flock on crashes;
+            # file existence is not evidence that an operation is still alive.
+            self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            os.ftruncate(self.fd, 0)
             payload = {"pid": os.getpid(), "host": socket.gethostname(), "started": time.time(), "root": str(self.root)}
             os.write(self.fd, json.dumps(payload).encode())
             os.fsync(self.fd)
-        except FileExistsError as exc:
+        except BlockingIOError as exc:
+            os.close(self.fd)
+            self.fd = None
             raise TransactionError(f"lock occupied: {self.path}") from exc
+        except BaseException:
+            if self.fd is not None:
+                os.close(self.fd)
+                self.fd = None
+            raise
         return self
 
     def __exit__(self, exc_type, exc, tb):
         if self.fd is not None:
+            fcntl.flock(self.fd, fcntl.LOCK_UN)
             os.close(self.fd)
-        try:
-            self.path.unlink()
-        except FileNotFoundError:
-            pass
+            self.fd = None
 
 
 def safe_path(root: Path, relative: str) -> Path:

@@ -10,7 +10,7 @@ import yaml
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / 'tools'))
-from workflow import load
+from workflow import load, INVENTORY_FIELDS
 
 
 class WorkflowTests(unittest.TestCase):
@@ -51,9 +51,14 @@ class WorkflowTests(unittest.TestCase):
 
     def ready(self, names=('foo', 'foobar'), sid='demo-001'):
         inv = f'inventory/slices/{sid}/'
-        self.write(inv + 'data-structures.yaml', {'status': 'confirmed', 'completion': dict.fromkeys(['structures_identified', 'fields_mapped', 'layout_mapped', 'pointer_semantics_mapped', 'shared_memory_classified', 'rust_strategy_defined', 'evidence_recorded'], True)})
+        self.write(inv + 'manifest.yaml', {'slice': sid, 'summary': {}})
+        self.write(inv + 'symbols.yaml', {'symbols': []})
+        self.write(inv + 'files.yaml', {'files': [], 'headers': []})
+        self.write(inv + 'callers.yaml', {'edges': []})
+        self.write(inv + 'dependencies.yaml', {'slice': sid, 'edges': []})
+        self.write(inv + 'data-structures.yaml', {'slice': sid, 'structures': [], 'status': 'confirmed', 'completion': dict.fromkeys(['structures_identified', 'fields_mapped', 'layout_mapped', 'pointer_semantics_mapped', 'shared_memory_classified', 'rust_strategy_defined', 'evidence_recorded'], True)})
         self.write(inv + 'mapping-confirmation.yaml', {'status': 'confirmed', 'counts': {'unresolved': 0}})
-        self.write(inv + 'behavior.yaml', {'status': 'confirmed', 'completion': dict.fromkeys(['source_logic_read', 'branches_mapped', 'calls_mapped', 'errors_mapped', 'side_effects_mapped', 'test_cases_defined'], True)})
+        self.write(inv + 'behavior.yaml', {'functions': [], 'status': 'confirmed', 'completion': dict.fromkeys(['source_logic_read', 'branches_mapped', 'calls_mapped', 'errors_mapped', 'side_effects_mapped', 'test_cases_defined'], True)})
         self.write(f'contracts/units/{sid}.yaml', {'status': 'confirmed'})
         self.write(f'plans/units/{sid}-model.yaml', {'status': 'confirmed'})
         self.write(inv + 'function-map.yaml', {'version': 2, 'functions': [{'c_name': name, 'function_id': f'c:foo.c:{i}:{name}', 'definition_file': 'foo.c', 'definition_line': i, 'state': 'planned'} for i, name in enumerate(names, 1)]})
@@ -82,10 +87,13 @@ class WorkflowTests(unittest.TestCase):
         self.ready()
         self.command('select-function', 'demo-001')
         unit = self.read()['active_unit']
+        self.assertEqual(self.read()['eligible_actions'], ['record-implementation'])
         self.implementation(unit)
+        self.assertEqual(self.read()['eligible_actions'], ['record-evidence'])
         states = [f['state'] for f in self.read('inventory/slices/demo-001/function-map.yaml')['functions']]
         self.assertEqual(states, ['implemented', 'planned'])
         self.command('record-evidence', unit, self.evidence(unit))
+        self.assertEqual(self.read()['eligible_actions'], ['compare'])
         self.command('compare', unit, 'passed')
         self.command('select-function', 'demo-001')
         self.assertEqual(self.read()['active_functions'], ['foobar'])
@@ -187,6 +195,9 @@ class WorkflowTests(unittest.TestCase):
         self.command('reconcile')
         self.assertEqual(self.read()['status'], 'blocked')
         self.assertEqual(self.read('plans/units/demo-slices.yaml')['slices'][0]['status'], 'blocked')
+        resume = self.command('resume', '--brief')
+        self.assertIn('LOOP_GUARD=stop', resume.stdout)
+        self.assertEqual(self.read()['eligible_actions'], ['review'])
         self.command('next', 'Correct the failed comparison')
         self.command('select-function', 'demo-001')
         self.assertEqual(self.read()['status'], 'in_progress')
@@ -219,7 +230,8 @@ class WorkflowTests(unittest.TestCase):
         self.command('reconcile')
         self.assertEqual(self.read()['phase'], 'inventory')
 
-    def test_organize_clears_command_and_honors_binary_crate_path(self):
+    def test_organize_derives_next_command_and_honors_binary_crate_path(self):
+        self.ready()
         state = self.read()
         state['output']['kind'] = 'binary'
         state['target']['path'] = 'crates/parser'
@@ -230,11 +242,13 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(plan['crate']['kind'], 'binary')
         self.assertEqual(plan['crate']['entry_file'], 'src/main.rs')
         self.assertEqual(plan['crate']['root'], str(self.project / 'crates/parser'))
-        self.assertEqual(self.read()['next_command'], '')
+        self.assertIn('select-function', self.read()['next_command'])
         self.command('validate-organization')
         plan['crate']['kind'] = 'library'
         self.write('plans/units/demo-001-organization.yaml', plan)
-        self.command('validate-organization', success=False)
+        result = self.command('validate-organization', success=False)
+        self.assertIn('demo-001-organization.yaml', result.stdout)
+        self.assertIn("crate.kind: expected 'binary', observed 'library'", result.stdout)
 
     def test_active_slice_gates_do_not_require_future_slice_artifacts(self):
         self.ready()
@@ -370,6 +384,223 @@ class WorkflowTests(unittest.TestCase):
         path.write_text('unit: demo\nunit: duplicate\nslices: []\n')
         self.command('reconcile', success=False)
         self.command('validate-artifacts', success=False)
+
+    def test_quoted_and_flow_yaml_are_accepted_by_contract_and_model(self):
+        self.ready(names=('foo',))
+        for relative in ['inventory/slices/demo-001/data-structures.yaml',
+                         'inventory/slices/demo-001/mapping-confirmation.yaml',
+                         'inventory/slices/demo-001/behavior.yaml',
+                         'contracts/units/demo-001.yaml']:
+            data = self.read(relative)
+            (self.state / relative).write_text(yaml.safe_dump(data, default_style='"', default_flow_style=True))
+        self.command('contract', 'demo-001')
+        (self.state / 'plans/units/demo-001-model.yaml').unlink()
+        self.command('model', 'demo-001')
+        self.assertEqual(self.read('plans/units/demo-001-model.yaml')['status'], 'draft')
+
+    def test_structure_diagnostics_identify_typo_false_and_string_boolean(self):
+        self.ready(names=('foo',))
+        relative = 'inventory/slices/demo-001/data-structures.yaml'
+        data = self.read(relative)
+        data['completion']['structs_identified'] = data['completion'].pop('structures_identified')
+        data['completion']['layout_mapped'] = False
+        data['completion']['fields_mapped'] = 'true'
+        self.write(relative, data)
+        result = self.command('model', 'demo-001', success=False)
+        self.assertIn(relative, result.stdout)
+        self.assertIn('completion.structures_identified', result.stdout)
+        self.assertIn('found structs_identified', result.stdout)
+        self.assertIn('completion.layout_mapped', result.stdout)
+        self.assertIn("observed 'true'", result.stdout)
+
+    def test_incomplete_inventory_returns_to_inventory_and_blocks_advancement(self):
+        self.ready(names=('foo',))
+        for name in ['callers.yaml', 'dependencies.yaml', 'files.yaml']:
+            (self.state / 'inventory/slices/demo-001' / name).unlink()
+        self.command('reconcile')
+        state = self.read()
+        self.assertEqual(state['phase'], 'inventory')
+        self.assertEqual(state['next_skill'], 'c-code-inventory')
+        for name in ['callers.yaml', 'dependencies.yaml', 'files.yaml']:
+            self.assertIn(name, state['next_action'])
+        for command in ['contract', 'model', 'select-function', 'organize']:
+            self.command(command, 'demo-001', success=False)
+        self.gate('behavior-gate.sh', success=False)
+        # Updating a folded diagnostic must preserve valid YAML and retry state.
+        self.command('failed', 'Inventory incomplete: review missing files')
+        self.assertEqual(self.read()['attempts'], 1)
+        self.assertEqual(self.read()['last_error'], 'Inventory incomplete: review missing files')
+
+    def test_inventory_validation_rejects_wrong_slice_and_invalid_artifacts(self):
+        self.ready(names=('foo',))
+        self.write('inventory/slices/demo-001/dependencies.yaml', {'slice': 'other', 'edges': 'invalid'})
+        (self.state / 'inventory/slices/demo-001/files.yaml').write_text('files: []\nfiles: []\nheaders: []\n')
+        self.command('reconcile')
+        self.assertEqual(self.read()['phase'], 'inventory')
+        result = self.command('model', 'demo-001', success=False)
+        self.assertIn("slice expected 'demo-001', observed 'other'", result.stdout)
+        self.assertIn('edges expected list', result.stdout)
+        self.assertIn('Duplicate YAML key', result.stdout)
+
+    def test_mapping_diagnostic_rejects_boolean_unresolved_count(self):
+        self.ready(names=('foo',))
+        self.write('inventory/slices/demo-001/mapping-confirmation.yaml', {'status': 'confirmed', 'counts': {'unresolved': False}})
+        result = self.command('model', 'demo-001', success=False)
+        self.assertIn('counts.unresolved expected integer 0', result.stdout)
+
+    def test_every_missing_inventory_artifact_prevents_phase_advancement(self):
+        self.ready(names=('foo',))
+        for name in INVENTORY_FIELDS:
+            with self.subTest(artifact=name):
+                path = self.state / 'inventory/slices/demo-001' / name
+                original = path.read_bytes()
+                path.unlink()
+                self.command('reconcile')
+                self.assertEqual(self.read()['phase'], 'inventory')
+                self.assertIn(name, self.read()['next_action'])
+                path.write_bytes(original)
+        self.command('reconcile')
+        self.assertEqual(self.read()['phase'], 'function_recovery')
+
+    def test_inventory_gate_accepts_drafts_but_confirmation_still_blocks(self):
+        self.ready(names=('foo',))
+        relative = 'inventory/slices/demo-001/data-structures.yaml'
+        data = self.read(relative)
+        data['status'] = 'draft'
+        data['completion']['structures_identified'] = False
+        self.write(relative, data)
+        self.gate('inventory-gate.sh')
+        self.command('reconcile')
+        self.assertEqual(self.read()['phase'], 'data_structure_mapping')
+        self.assertIn('completion.structures_identified', self.read()['next_action'])
+        self.command('model', 'demo-001', success=False)
+
+    def legacy_source(self, declared_name='foo'):
+        legacy = self.project / 'legacy with spaces'
+        legacy.mkdir(exist_ok=True)
+        (legacy / 'api.h').write_text(f'unsigned int {declared_name}(unsigned int value);\n')
+        (legacy / 'api.c').write_text(f'#include "api.h"\nunsigned int {declared_name}(unsigned int value) {{ return value + 1; }}\n')
+        manifest = self.read('plans/units/demo-slices.yaml')
+        manifest['slices'][0]['source'].update(project_root=str(legacy), headers=['api.h'])
+        self.write('plans/units/demo-slices.yaml', manifest)
+        return legacy
+
+    def test_stage_machine_rejects_skips_even_when_phase_is_spoofed(self):
+        self.ready(names=('foo',))
+        self.write('plans/units/demo-001-model.yaml', {'status': 'draft'})
+        state = self.read()
+        state.update(phase='function_implementation', next_command='cargo test')
+        self.write('migration.yaml', state)
+        for command in ['organize', 'select-function']:
+            result = self.command(command, 'demo-001', success=False)
+            self.assertIn('required stage modeling', result.stdout)
+        self.command('reconcile')
+        self.assertEqual(self.read()['phase'], 'modeling')
+
+    def test_stage_machine_rejects_ineligible_slice_and_preserves_blockers(self):
+        self.ready(names=('foo',))
+        manifest = self.read('plans/units/demo-slices.yaml')
+        manifest['slices'].append(self.slice('future', order=2))
+        self.write('plans/units/demo-slices.yaml', manifest)
+        self.command('model', 'future', success=False)
+        self.assertFalse((self.state / 'plans/units/future-model.yaml').exists())
+        self.command('failed', 'root cause not fixed')
+        self.command('failed', 'root cause not fixed', success=False)
+        for command in ['contract', 'model', 'organize', 'recover']:
+            args = () if command == 'recover' else ('demo-001',)
+            self.command(command, *args, success=False)
+        self.assertEqual(self.read()['attempts'], 2)
+        self.assertEqual(self.read()['status'], 'blocked')
+
+    def test_stale_organization_has_executable_recovery_and_preserves_slice_notes(self):
+        self.ready(names=('foo',))
+        manifest = self.read('plans/units/demo-slices.yaml')
+        manifest['slices'][0]['semantic_name'] = 'digit_count'
+        self.write('plans/units/demo-slices.yaml', manifest)
+        notes = self.write('plans/units/demo-001.md', {'manual_decision': 'keep this'})
+        before_notes = notes.read_bytes()
+        self.command('reconcile')
+        recovery = self.read()['recovery']
+        self.assertEqual(recovery['code'], 'organization_stale')
+        self.assertTrue(recovery['automatic'])
+        self.assertIn('organize', self.read()['next_command'])
+        self.command('failed', 'old organization validation failed')
+        self.command('recover')
+        self.command('validate-organization')
+        self.assertEqual(self.read()['phase'], 'function_recovery')
+        self.assertEqual(self.read()['attempts'], 0)
+        self.assertEqual(notes.read_bytes(), before_notes)
+
+    def test_recovery_exports_missing_inventory_from_declared_scope(self):
+        self.legacy_source()
+        self.command('reconcile')
+        self.assertEqual(self.read()['recovery']['action'], 'inventory')
+        self.command('recover')
+        self.gate('inventory-gate.sh')
+        self.assertEqual(self.read()['phase'], 'data_structure_mapping')
+        self.assertIsNotNone(self.read('inventory/slices/demo-001/manifest.yaml')['generation'])
+        self.assertEqual(self.read('inventory/slices/demo-001/function-map.yaml')['functions'][0]['c_name'], 'foo')
+
+    def test_recovery_does_not_overwrite_confirmed_partial_inventory(self):
+        self.ready(names=('foo',))
+        self.legacy_source()
+        behavior = self.state / 'inventory/slices/demo-001/behavior.yaml'
+        before = behavior.read_bytes()
+        (self.state / 'inventory/slices/demo-001/callers.yaml').unlink()
+        self.command('recover')
+        self.assertEqual(self.read()['recovery']['code'], 'inventory_review_required')
+        self.assertFalse(self.read()['recovery']['automatic'])
+        self.assertEqual(behavior.read_bytes(), before)
+        self.assertEqual(self.read()['attempts'], 0)
+
+    def test_recovery_requires_changed_inputs_after_execution_failure(self):
+        self.legacy_source(declared_name='other')
+        self.command('recover', success=False)
+        self.assertEqual(self.read()['attempts'], 1)
+        self.assertEqual(self.read()['failure_kind'], 'execution')
+        result = self.command('recover', success=False)
+        self.assertIn('unchanged inputs', result.stdout)
+        self.assertEqual(self.read()['attempts'], 1)
+        self.legacy_source(declared_name='foo')
+        self.command('recover')
+        self.assertEqual(self.read()['attempts'], 0)
+        self.gate('inventory-gate.sh')
+
+    def test_analysis_pending_recovery_does_not_count_as_execution_failure(self):
+        self.ready(names=('foo',))
+        path = 'inventory/slices/demo-001/behavior.yaml'
+        data = self.read(path)
+        data['status'] = 'draft'
+        self.write(path, data)
+        self.command('recover')
+        self.assertEqual(self.read()['phase'], 'behavior_extraction')
+        self.assertEqual(self.read()['recovery']['code'], 'behavior_unconfirmed')
+        self.assertEqual(self.read()['attempts'], 0)
+        resume = self.command('resume', '--brief')
+        self.assertIn('RECOVERY_CODE=behavior_unconfirmed', resume.stdout)
+        self.assertIn('ELIGIBLE_ACTIONS=', resume.stdout)
+        self.assertIn('using NEXT_SKILL', resume.stdout)
+
+    def test_invalid_organization_inputs_require_review_without_retrying(self):
+        self.ready(names=('foo',))
+        manifest = self.read('plans/units/demo-slices.yaml')
+        manifest['slices'][0]['target'] = {'output_kind': 'invalid'}
+        self.write('plans/units/demo-slices.yaml', manifest)
+        self.command('recover')
+        self.assertEqual(self.read()['recovery']['code'], 'organization_inputs_invalid')
+        self.assertFalse(self.read()['recovery']['automatic'])
+        self.assertEqual(self.read()['attempts'], 0)
+
+    def test_direct_inventory_execution_records_failure_and_blocks_unchanged_retries(self):
+        self.legacy_source(declared_name='other')
+        self.command('inventory', 'demo-001', success=False)
+        self.assertEqual(self.read()['attempts'], 1)
+        self.command('recover', success=False)
+        self.assertEqual(self.read()['attempts'], 1)
+        self.legacy_source(declared_name='foo')
+        self.command('inventory', 'demo-001')
+        self.assertEqual(self.read()['attempts'], 0)
+        self.assertTrue(self.read()['recovery_history'])
 
 
 if __name__ == '__main__':

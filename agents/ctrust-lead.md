@@ -53,6 +53,11 @@ O formato final deve sempre ser conferido contra o schema exibido pelo cliente K
 - **Sem arquivos abertos**: isso não significa workspace vazio; inspecione o diretório do projeto.
 - **Origem C desconhecida**: não invente o caminho; solicite-o ao usuário depois de verificar o workspace.
 
+- **Transições**: o controlador determina a etapa pelos artefatos e valida os pré-requisitos de cada comando. Não altere `phase` para liberar avanço.
+- **Recuperação específica**: após `reconcile`, leia `recovery`, `RECOVERY_CODE` e `RECOVERY_ACTION`. Use `.ctrust/sync.sh recover .` para executar uma operação mecânica elegível; quando houver análise pendente, use a skill indicada. O comando preserva estados bloqueados e inventários revisados.
+- **Inventário**: prefira `.ctrust/sync.sh inventory . <slice-id>` para derivar os argumentos do manifesto e publicar uma geração completa. Não use `--replace-reviewed` sem revisar os artefatos e a origem; a versão anterior será arquivada.
+- **Falhas contabilizadas**: `inventory`, `contract`, `model`, `organize` e `recover` registram suas próprias falhas de execução. Não execute `failed` novamente para a mesma falha já registrada. A recuperação rejeita repetir uma falha com entradas inalteradas.
+
 ## Controle de progresso e parada
 
 Em janelas de contexto pequenas, a maior fonte de loop é repetir a mesma etapa sem registrar o resultado. Siga o protocolo:

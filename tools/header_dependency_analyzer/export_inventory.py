@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -9,6 +10,9 @@ from pathlib import Path
 
 import networkx as nx
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from inventory_transaction import publish_inventory
+from artifact_sync.transaction import TransactionError
 from analyze import analyze, parse_file
 
 
@@ -42,14 +46,20 @@ def yaml_lines(value, indent=0):
                 for key, child in item.items():
                     if first:
                         if isinstance(child, (dict, list)):
-                            lines.append(f"{prefix}- {key}:")
-                            lines.extend(yaml_lines(child, indent + 4))
+                            if not child:
+                                lines.append(f"{prefix}- {key}: {'[]' if isinstance(child, list) else '{}'}")
+                            else:
+                                lines.append(f"{prefix}- {key}:")
+                                lines.extend(yaml_lines(child, indent + 4))
                         else:
                             lines.append(f"{prefix}- {key}: {scalar(child)}")
                         first = False
                     elif isinstance(child, (dict, list)):
-                        lines.append(f"{prefix}  {key}:")
-                        lines.extend(yaml_lines(child, indent + 4))
+                        if not child:
+                            lines.append(f"{prefix}  {key}: {'[]' if isinstance(child, list) else '{}'}")
+                        else:
+                            lines.append(f"{prefix}  {key}:")
+                            lines.extend(yaml_lines(child, indent + 4))
                     else:
                         lines.append(f"{prefix}  {key}: {scalar(child)}")
             elif isinstance(item, (dict, list)):
@@ -211,9 +221,8 @@ def behavior_for_graph(graph, report, slice_id, mode="compact"):
     }
 
 
-def export_slice(project, headers, output, slice_id, compile_commands=None, cache_dir=None, mode="compact", root_functions=None):
+def export_slice(project, headers, output, slice_id, compile_commands=None, cache_dir=None, mode="compact", root_functions=None, replace_reviewed=False):
     graph, report = merge_analyses(project, headers, compile_commands, cache_dir, root_functions)
-    output.mkdir(parents=True, exist_ok=True)
 
     nodes = []
     files = set()
@@ -290,18 +299,26 @@ def export_slice(project, headers, output, slice_id, compile_commands=None, cach
     }
     manifest_source = report if mode == "full" else {"headers": report["headers"], "analyzer": "header_dependency_analyzer", "analyzer_version": report.get("analyzer_version", "unknown")}
 
-    write_yaml(output / "data-structures.yaml", data_structures)
-    write_yaml(output / "behavior.yaml", behavior)
-    mapping_items = []
-    for structure in structures:
-        mapping_items.append({"c_name": structure.get("name", ""), "message_dto": "", "domain": "", "strategy": "unresolved"})
-    write_yaml(output / "mapping-confirmation.yaml", {"version": 1, "kind": "data-structure-mapping-confirmation", "slice": slice_id, "status": "draft", "revision": 1, "counts": {"reachable": len(structures), "classified": 0, "excluded": 0, "unresolved": len(mapping_items)}, "mappings": mapping_items, "exclusions": []})
-    write_yaml(output / "manifest.yaml", {"version": 1, "kind": "header-dependency-inventory", "slice": slice_id, "status": "generated", "mode": mode, "summary": summary, "source": manifest_source, "artifacts": {"data_structures": "data-structures.yaml", "mapping_confirmation": "mapping-confirmation.yaml", "behavior": "behavior.yaml"}})
-    write_yaml(output / "symbols.yaml", {"version": 1, "symbols": nodes})
-    write_yaml(output / "function-map.yaml", {"version": 2, "slice": slice_id, "revision": 1, "units": [], "source": "header_dependency_analyzer", "functions": function_map})
-    write_yaml(output / "dependencies.yaml", dependencies)
-    write_yaml(output / "callers.yaml", {"version": 1, "source": "header_dependency_analyzer", "edges": [{"caller": item["caller"], "callee": item["callee"], "confidence": item["confidence"]} for item in callers]})
-    write_yaml(output / "files.yaml", {"version": 1, "files": sorted(files), "headers": report["headers"]})
+    def generate(stage, generation):
+        write_yaml(stage / "data-structures.yaml", data_structures)
+        write_yaml(stage / "behavior.yaml", behavior)
+        mapping_items = []
+        for structure in structures:
+            mapping_items.append({"c_name": structure.get("name", ""), "message_dto": "", "domain": "", "strategy": "unresolved"})
+        write_yaml(stage / "mapping-confirmation.yaml", {"version": 1, "kind": "data-structure-mapping-confirmation", "slice": slice_id, "status": "draft", "revision": 1, "counts": {"reachable": len(structures), "classified": 0, "excluded": 0, "unresolved": len(mapping_items)}, "mappings": mapping_items, "exclusions": []})
+        write_yaml(stage / "manifest.yaml", {"version": 1, "kind": "header-dependency-inventory", "slice": slice_id, "status": "generated", "mode": mode, "summary": summary, "source": manifest_source, "artifacts": {"data_structures": "data-structures.yaml", "mapping_confirmation": "mapping-confirmation.yaml", "behavior": "behavior.yaml"}})
+        write_yaml(stage / "symbols.yaml", {"version": 1, "symbols": nodes})
+        write_yaml(stage / "function-map.yaml", {"version": 2, "slice": slice_id, "revision": 1, "units": [], "source": "header_dependency_analyzer", "functions": function_map})
+        write_yaml(stage / "dependencies.yaml", dependencies)
+        write_yaml(stage / "callers.yaml", {"version": 1, "source": "header_dependency_analyzer", "edges": [{"caller": item["caller"], "callee": item["callee"], "confidence": item["confidence"]} for item in callers]})
+        write_yaml(stage / "files.yaml", {"version": 1, "files": sorted(files), "headers": report["headers"]})
+        manifest_path = stage / "manifest.yaml"
+        from workflow import load, INVENTORY_FIELDS
+        manifest = load(manifest_path)
+        manifest["generation"] = generation
+        manifest["artifact_digests"] = {name: hashlib.sha256((stage / name).read_bytes()).hexdigest() for name in INVENTORY_FIELDS if name != "manifest.yaml"}
+        write_yaml(manifest_path, manifest)
+    publish_inventory(output, slice_id, generate, replace_reviewed)
     return report, graph
 
 
@@ -315,11 +332,16 @@ def main():
     parser.add_argument("--function", action="append", default=[], help="Function declared in the input header and belonging to this slice; repeat for multiple roots")
     parser.add_argument("--cache-dir", type=Path)
     parser.add_argument("--mode", choices=("compact", "full"), default="compact")
+    parser.add_argument("--replace-reviewed", action="store_true", help="Explicitly archive and replace an enriched or confirmed inventory")
     args = parser.parse_args()
-    report, graph = export_slice(args.project, args.header, args.output, args.slice, args.compile_commands, args.cache_dir, args.mode, args.function)
+    try:
+        report, graph = export_slice(args.project, args.header, args.output, args.slice, args.compile_commands, args.cache_dir, args.mode, args.function, args.replace_reviewed)
+    except (TransactionError, ValueError, OSError) as exc:
+        print(f"Inventory blocked: {exc}", file=sys.stderr)
+        return 3
     print(f"Exported {len(graph.nodes)} symbols and {len(graph.edges)} dependencies for {args.slice}")
     print(f"Unresolved: {len(report['unresolved_calls'])}; ambiguous: {len(report['ambiguous_calls'])}; indirect: {len(report['indirect_calls'])}")
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

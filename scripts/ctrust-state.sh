@@ -23,6 +23,8 @@ Commands:
   reconcile-artifacts [project] Reconcile .ctrust artifacts deterministically
   validate-artifacts [project] Validate .ctrust artifacts without writing
   plan-slices [project] Create one plan Markdown file for every slice
+  inventory  [project] [slice] Export inventory transactionally from the slice manifest
+  recover    [project] Execute one eligible mechanical recovery; preserve blockers
   organize   [project] Generate deterministic organization plan
   validate-organization [project] Validate organization without writing
   resume     [project] [--brief|--full] Print recovery context (default --brief)
@@ -197,97 +199,35 @@ create_unit_file() {
 }
 
 contract() {
-    local unit="$TITLE"
-    local contract_file="$STATE/contracts/units/$unit.yaml"
-    local existing_contract=0
-    if [ -z "$unit" ]; then
-        echo "Usage: ctrust-state.sh contract <project> <unit>" >&2
-        return 2
-    fi
     require_workspace
-    workflow_run prerequisites "$unit" contract
-    if [ ! -f "$STATE/inventory/slices/$unit/data-structures.yaml" ] || ! grep -q '^status:[[:space:]]*confirmed[[:space:]]*$' "$STATE/inventory/slices/$unit/data-structures.yaml"; then
-        echo "data structures not confirmed: $STATE/inventory/slices/$unit/data-structures.yaml; run data-structure-mapping first" >&2
-        return 3
-    fi
-    if [ ! -f "$STATE/inventory/slices/$unit/mapping-confirmation.yaml" ] || ! grep -q '^status:[[:space:]]*confirmed[[:space:]]*$' "$STATE/inventory/slices/$unit/mapping-confirmation.yaml" || ! grep -q '^  unresolved:[[:space:]]*0[[:space:]]*$' "$STATE/inventory/slices/$unit/mapping-confirmation.yaml"; then
-        echo "C to DTO/domain mapping not confirmed: $STATE/inventory/slices/$unit/mapping-confirmation.yaml; complete mapping-confirmation first" >&2
-        return 3
-    fi
-    if [ ! -f "$STATE/inventory/slices/$unit/behavior.yaml" ] || ! grep -q '^status:[[:space:]]*confirmed[[:space:]]*$' "$STATE/inventory/slices/$unit/behavior.yaml"; then
-        echo "behavior not confirmed: $STATE/inventory/slices/$unit/behavior.yaml; run c-behavior-extraction first" >&2
-        return 3
-    fi
-    [ -f "$contract_file" ] && existing_contract=1
-    create_unit_file "$TEMPLATE_ROOT/templates/contract.yaml" "$contract_file" "$unit"
-    if [ "$existing_contract" -eq 1 ] && grep -q '^status:[[:space:]]*confirmed[[:space:]]*$' "$contract_file"; then
-        reconcile_state
-        return 0
-    fi
-    create_unit_file "$TEMPLATE_ROOT/templates/unit-plan.md" "$STATE/plans/units/$unit.md" "$unit"
-    update_state_line phase contract_analysis
-    update_state_line status in_progress
-    update_state_line current_unit "$unit"
-    update_state_line next_action "Extract and confirm contracts for $unit"
-    update_state_line next_command '""'
-    update_state_line next_skill contract-extraction
+    workflow_run contract "$TITLE"
     sync_context
-    printf '{"ts":"%s","event":"contract_started","unit":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$unit" >> "$STATE/logs/progress.ndjson"
 }
 
 model() {
-    local unit="$TITLE"
-    local contract_file="$STATE/contracts/units/$unit.yaml"
-    if [ -z "$unit" ]; then
-        echo "Usage: ctrust-state.sh model <project> <unit>" >&2
-        return 2
-    fi
     require_workspace
-    workflow_run prerequisites "$unit" model
-    if [ ! -f "$STATE/inventory/slices/$unit/data-structures.yaml" ] || ! grep -q '^status:[[:space:]]*confirmed[[:space:]]*$' "$STATE/inventory/slices/$unit/data-structures.yaml"; then
-        echo "data structures not confirmed: $STATE/inventory/slices/$unit/data-structures.yaml; run data-structure-mapping first" >&2
-        return 3
-    fi
-    if [ ! -f "$STATE/inventory/slices/$unit/behavior.yaml" ] || ! grep -q '^status:[[:space:]]*confirmed[[:space:]]*$' "$STATE/inventory/slices/$unit/behavior.yaml"; then
-        echo "behavior not confirmed: $STATE/inventory/slices/$unit/behavior.yaml; run c-behavior-extraction first" >&2
-        return 3
-    fi
-    if [ ! -f "$contract_file" ]; then
-        echo "contract not found: $contract_file; run contract first" >&2
-        return 2
-    fi
-    if ! grep -q '^status:[[:space:]]*confirmed[[:space:]]*$' "$contract_file"; then
-        echo "contract is not confirmed: $contract_file; set status: confirmed after evidence review" >&2
-        return 3
-    fi
-    if [ -f "$STATE/plans/units/$unit-model.yaml" ]; then
-        reconcile_state
-        return 0
-    fi
-    create_unit_file "$TEMPLATE_ROOT/templates/model.yaml" "$STATE/plans/units/$unit-model.yaml" "$unit"
-    update_state_line phase modeling
-    update_state_line status in_progress
-    update_state_line current_unit "$unit"
-    update_state_line next_action "Complete Rust type and API model for $unit"
-    update_state_line next_command '""'
-    update_state_line next_skill rust-domain-modeling
+    workflow_run model "$TITLE"
     sync_context
-    printf '{"ts":"%s","event":"modeling_started","unit":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$unit" >> "$STATE/logs/progress.ndjson"
+}
+
+inventory() {
+    require_workspace
+    workflow_run inventory "$TITLE"
+    sync_context
+}
+
+recover() {
+    require_workspace
+    workflow_run recover
+    sync_context
 }
 
 state_value() {
-    local key="$1"
-    sed -n "s/^${key}:[[:space:]]*//p" "$STATE/migration.yaml" | head -n 1
+    workflow_run read-state "$1"
 }
 
 state_child() {
-    local section="$1"
-    local key="$2"
-    awk -v section="$section" -v key="$key" '
-        $0 == section ":" { inside=1; next }
-        inside && $0 !~ /^  / { exit }
-        inside && $1 == key ":" { sub("^[^:]+:[[:space:]]*", ""); print; exit }
-    ' "$STATE/migration.yaml"
+    workflow_run read-state "$1" "$2"
 }
 
 sync_context() {
@@ -334,13 +274,7 @@ validate_artifacts() {
 
 organize() {
     require_workspace
-    local tool_root="${TEMPLATE_ROOT}/tools"
-    PYTHONPATH="$tool_root${PYTHONPATH:+:$PYTHONPATH}" python3 -m organization.cli --project "$ROOT"
-    update_state_line phase organization
-    update_state_line status in_progress
-    update_state_line next_action "Validate organization and begin the planned slice port"
-    update_state_line next_skill rust-module-organization
-    update_state_line next_command '""'
+    workflow_run organize "$TITLE"
     sync_context
 }
 
@@ -436,13 +370,19 @@ resume_brief() {
     printf 'NEXT_COMMAND=%s\n' "$(state_value next_command)"
     printf 'NEXT_OWNER=%s\n' "$(state_value next_owner)"
     printf 'NEXT_SKILL=%s\n' "$(state_value next_skill)"
+    printf 'RECOVERY_CODE=%s\n' "$(state_child recovery code)"
+    printf 'RECOVERY_ACTION=%s\n' "$(state_child recovery action)"
+    printf 'ELIGIBLE_ACTIONS=%s\n' "$(state_value eligible_actions)"
     printf 'LAST_CHECKPOINT=%s\n' "$(state_value last_checkpoint)"
     printf 'ATTEMPTS=%s/%s\n' "$attempts" "$max_attempts"
     printf 'LAST_ERROR=%s\n' "$(state_value last_error)"
 
-    if [ "$attempts" -ge "$max_attempts" ] 2>/dev/null; then
+    if [ "$(state_value status)" = "blocked" ] || [ "$attempts" -ge "$max_attempts" ] 2>/dev/null; then
         printf 'LOOP_GUARD=stop\n'
         printf 'GUIDANCE=Do not retry the same action. Report the blocker to the user.\n'
+    elif [ -z "$(state_value next_command)" ]; then
+        printf 'LOOP_GUARD=ok\n'
+        printf 'GUIDANCE=Complete NEXT_ACTION using NEXT_SKILL, validate the artifacts, then reconcile.\n'
     else
         printf 'LOOP_GUARD=ok\n'
         printf 'GUIDANCE=Execute only NEXT_COMMAND, then update state and checkpoint.\n'
@@ -522,10 +462,10 @@ next() {
         workflow_run reopen "$action"
     fi
 
-    update_state_line next_action "\"$action\""
-    update_state_line next_command "\"$command\""
+    update_state_line next_action "$action"
+    update_state_line next_command "$command"
     update_state_line attempts 0
-    update_state_line last_error "\"\""
+    update_state_line last_error ""
     update_state_line status in_progress
     sync_context
     printf '{"ts":"%s","event":"next_action_set","action":"%s","command":"%s"}\n' \
@@ -545,7 +485,7 @@ attempt_failed() {
     attempts=$((attempts + 1))
 
     update_state_line attempts "$attempts"
-    update_state_line last_error "\"$reason\""
+    update_state_line last_error "$reason"
 
     if [ "$attempts" -ge "$max_attempts" ]; then
         update_state_line status blocked
@@ -642,19 +582,16 @@ EOF
 }
 
 update_state_line() {
-    local key="$1"
-    local value="$2"
-    local tmp
-    tmp="$(mktemp)"
-    awk -v key="$key" -v value="$value" '
-        index($0, key ":") == 1 { print key ": " value; found=1; next }
-        { print }
-        END { if (!found) print key ": " value }
-    ' "$STATE/migration.yaml" > "$tmp"
-    mv "$tmp" "$STATE/migration.yaml"
+    workflow_run update-state "$1" "$2"
 }
 
 case "$COMMAND" in
+    inventory)
+        inventory
+        ;;
+    recover)
+        recover
+        ;;
     init)
         init_workspace
         ;;
@@ -703,6 +640,10 @@ case "$COMMAND" in
     verify-slice)
         require_workspace
         slice="${TITLE/checkpoint/}"
+        if [ -z "$slice" ]; then
+            slice="$(state_value current_unit)"
+        fi
+        workflow_run guard-action "$slice" verify-slice
         "$SCRIPT_DIR/migration-gate.sh" "$ROOT" "$slice"
         workflow_run verify-slice "$slice"
         checkpoint

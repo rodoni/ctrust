@@ -1,7 +1,12 @@
 """Structured artifact handling shared by the controller and migration gates."""
 import argparse
+import hashlib
 import json
 import re
+import shlex
+import subprocess
+import sys
+from importlib import metadata
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -9,9 +14,14 @@ import yaml
 
 from artifact_sync.transaction import WorkspaceLock, atomic_write, TransactionError
 from function_recovery import UnitState, ALLOWED_TRANSITIONS
+from workflow_stages import STAGES, ACTION_REQUIREMENTS, FUNCTION_ACTIONS
 
 
 class WorkflowError(ValueError):
+    pass
+
+
+class ExecutionError(WorkflowError):
     pass
 
 
@@ -49,6 +59,8 @@ def load(path):
         raise WorkflowError(f"Artifact not found: {path}")
     try:
         result = yaml.load(path.read_text(encoding="utf-8"), Loader=Loader)
+    except WorkflowError as exc:
+        raise WorkflowError(f"Invalid YAML in {path}: {exc}") from exc
     except yaml.YAMLError as exc:
         raise WorkflowError(f"Invalid YAML in {path}: {exc}") from exc
     if not isinstance(result, dict):
@@ -67,11 +79,80 @@ BEHAVIOR_FIELDS = ("source_logic_read", "branches_mapped", "calls_mapped", "erro
 STATES = {s.value for s in UnitState}
 
 
-def confirmed(path, fields=()):
+def confirmation_errors(path, fields=()):
     if not path.is_file():
-        return False
+        return [f"{path}: missing artifact"]
     data = load(path)
-    return data.get("status") == "confirmed" and all(data.get("completion", {}).get(f) is True for f in fields)
+    errors = []
+    if data.get("status") != "confirmed":
+        errors.append(f"{path}: status expected 'confirmed', observed {data.get('status')!r}; review evidence before confirming")
+    completion = data.get("completion", {})
+    if not isinstance(completion, dict):
+        errors.append(f"{path}: completion expected mapping, observed {completion!r}")
+        completion = {}
+    for field in fields:
+        if completion.get(field) is not True:
+            observed = repr(completion[field]) if field in completion else "missing"
+            hint = "; found structs_identified; use structures_identified" if field == "structures_identified" and "structs_identified" in completion else ""
+            errors.append(f"{path}: completion.{field} expected boolean true, observed {observed}{hint}; complete analysis and evidence before confirming")
+    return errors
+
+
+def confirmed(path, fields=()):
+    return not confirmation_errors(path, fields)
+
+
+def require_confirmed(path, fields=()):
+    errors = confirmation_errors(path, fields)
+    if errors:
+        raise WorkflowError("; ".join(errors))
+
+
+# Artifacts emitted together by export_inventory.py. Draft analysis is valid
+# inventory; confirmation is a separate gate after factual export.
+INVENTORY_FIELDS = {
+    "manifest.yaml": {"summary": dict},
+    "symbols.yaml": {"symbols": list},
+    "function-map.yaml": {"functions": list},
+    "dependencies.yaml": {"edges": list},
+    "callers.yaml": {"edges": list},
+    "files.yaml": {"files": list, "headers": list},
+    "data-structures.yaml": {"structures": list},
+    "mapping-confirmation.yaml": {"counts": dict},
+    "behavior.yaml": {"functions": list},
+}
+
+
+def inventory_errors(root, sid, directory=None):
+    errors = []
+    for name, fields in INVENTORY_FIELDS.items():
+        path = (directory if directory is not None else root / f"inventory/slices/{sid}") / name
+        try:
+            data = load(path)
+        except WorkflowError as exc:
+            errors.append(str(exc))
+            continue
+        if "slice" in data and data["slice"] != sid:
+            errors.append(f"{path}: slice expected {sid!r}, observed {data['slice']!r}")
+        for field, expected in fields.items():
+            if not isinstance(data.get(field), expected):
+                observed = repr(data[field]) if field in data else "missing"
+                errors.append(f"{path}: {field} expected {expected.__name__}, observed {observed}")
+    return errors
+
+
+def require_inventory(root, sid):
+    errors = inventory_errors(root, sid)
+    if errors:
+        raise WorkflowError("Inventory incomplete or invalid; run c-code-inventory for " + sid + ": " + "; ".join(errors))
+
+
+def require_mapping(path):
+    require_confirmed(path)
+    counts = load(path).get("counts", {})
+    unresolved = counts.get("unresolved") if isinstance(counts, dict) else None
+    if type(unresolved) is not int or unresolved != 0:
+        raise WorkflowError(f"{path}: counts.unresolved expected integer 0, observed {unresolved!r}; resolve and confirm mappings")
 
 
 def manifests(root):
@@ -240,22 +321,125 @@ def validate_comparison(fn, records):
         raise WorkflowError("Missing comparison classification")
 
 
-def prerequisites(root, sid, stage):
+def stage_errors(root, sid, phase):
     inventory = root / f"inventory/slices/{sid}"
-    if not confirmed(inventory / "data-structures.yaml", STRUCTURE_FIELDS):
-        raise WorkflowError(f"Data structures not fully confirmed: {sid}")
-    mapping = load(inventory / "mapping-confirmation.yaml")
-    if mapping.get("status") != "confirmed" or mapping.get("counts", {}).get("unresolved") != 0:
-        raise WorkflowError(f"Mapping unresolved or unconfirmed: {sid}")
-    if not confirmed(inventory / "behavior.yaml", BEHAVIOR_FIELDS):
-        raise WorkflowError(f"Behavior not fully confirmed: {sid}")
-    if stage in {"model", "port"} and not confirmed(root / f"contracts/units/{sid}.yaml"):
-        raise WorkflowError(f"Contract not confirmed: {sid}")
-    if stage == "port":
-        if not confirmed(root / f"plans/units/{sid}-model.yaml"):
-            raise WorkflowError(f"Model not confirmed: {sid}")
-        from organization.cli import validate_persisted
-        validate_persisted(root.parent, sid)
+    try:
+        if phase == "inventory":
+            return inventory_errors(root, sid)
+        if phase == "data_structure_mapping":
+            errors = confirmation_errors(inventory / "data-structures.yaml", STRUCTURE_FIELDS)
+            try:
+                require_mapping(inventory / "mapping-confirmation.yaml")
+            except WorkflowError as exc:
+                errors.append(str(exc))
+            return errors
+        if phase == "behavior_extraction":
+            return confirmation_errors(inventory / "behavior.yaml", BEHAVIOR_FIELDS)
+        if phase == "contract_analysis":
+            return confirmation_errors(root / f"contracts/units/{sid}.yaml")
+        if phase == "modeling":
+            return confirmation_errors(root / f"plans/units/{sid}-model.yaml")
+        if phase == "organization":
+            from organization.cli import validate_persisted
+            validate_persisted(root.parent, sid)
+            return []
+        raise WorkflowError(f"Unknown stage: {phase}")
+    except (WorkflowError, ValueError, OSError) as exc:
+        return [str(exc)]
+
+
+def require_action(root, state, sid, command):
+    if command not in ACTION_REQUIREMENTS:
+        raise WorkflowError(f"Unknown advancing command: {command}")
+    if state.get("status") == "blocked" or state.get("attempts", 0) >= state.get("max_attempts", 2):
+        raise WorkflowError("Migration blocked; resolve the cause and record a different next action")
+    entries = manifests(root)
+    if select_slice(entries, state) != sid or entries[sid][0].get("status") == "blocked":
+        raise WorkflowError(f"Slice {sid} is not the active eligible slice")
+    for stage in STAGES[:ACTION_REQUIREMENTS[command]]:
+        errors = stage_errors(root, sid, stage.phase)
+        if errors:
+            raise WorkflowError(f"Cannot execute {command} for {sid}; required stage {stage.phase}: " + "; ".join(errors))
+
+
+def prerequisites(root, sid, stage):
+    required = {"contract": 3, "model": 4, "organization": 5, "port": 6}
+    if stage not in required:
+        raise WorkflowError(f"Unknown prerequisite stage: {stage}")
+    for item in STAGES[:required[stage]]:
+        errors = stage_errors(root, sid, item.phase)
+        if errors:
+            raise WorkflowError("; ".join(errors))
+
+
+def inventory_arguments(project, root, state, sid):
+    item = manifests(root)[sid][0]
+    source = item.get("source", {})
+    source_root = source.get("project_root") or state.get("source", {}).get("project_root")
+    if not source_root:
+        raise WorkflowError(f"{sid}: source.project_root missing; define source before exporting")
+    source_path = Path(source_root)
+    source_path = (project / source_path).resolve() if not source_path.is_absolute() else source_path.resolve()
+    if not source_path.is_dir():
+        raise WorkflowError(f"{sid}: C source directory not found: {source_path}")
+    headers = source.get("headers", [])
+    functions = source.get("functions", [])
+    if not headers or not functions:
+        raise WorkflowError(f"{sid}: source.headers and source.functions are required; review the slice manifest")
+    args = [sys.executable, str(Path(__file__).parent / "header_dependency_analyzer/export_inventory.py"), "--project", str(source_path), "--slice", sid, "--output", str(root / f"inventory/slices/{sid}"), "--cache-dir", str(root / "cache/header_dependency_analyzer")]
+    for header in headers:
+        path = Path(header)
+        path = path if path.is_absolute() else source_path / path
+        if not path.is_file():
+            raise WorkflowError(f"{sid}: source header not found: {path}")
+        args.extend(["--header", str(path)])
+    for fn in functions:
+        if not isinstance(fn, dict) or not fn.get("c_name"):
+            raise WorkflowError(f"{sid}: source.functions entry requires c_name: {fn!r}")
+        args.extend(["--function", fn["c_name"]])
+    compile_commands = source.get("compile_commands") or state.get("source", {}).get("compile_commands")
+    if compile_commands:
+        path = Path(compile_commands)
+        args.extend(["--compile-commands", str(path if path.is_absolute() else source_path / path)])
+    return args
+
+
+def recovery_for_stage(project, root, state, sid, stage, errors):
+    recovery = {"code": stage.recovery_code, "stage": stage.phase, "slice": sid, "action": "review", "automatic": False, "details": errors}
+    command = ""
+    if stage.phase == "inventory":
+        try:
+            from inventory_transaction import reviewed_artifacts
+            reviewed = reviewed_artifacts(root / f"inventory/slices/{sid}")
+            inventory_arguments(project, root, state, sid)
+            if reviewed:
+                recovery.update(code="inventory_review_required", details=errors + ["Reviewed artifacts preserved: " + ", ".join(reviewed)])
+            else:
+                recovery.update(action="inventory", automatic=True)
+                command = shlex.join([".ctrust/sync.sh", "inventory", ".", sid])
+        except (WorkflowError, ValueError, OSError, TransactionError) as exc:
+            recovery["details"] = errors + [str(exc)]
+    elif stage.phase == "organization":
+        # Only a valid calculated plan can be regenerated automatically.
+        try:
+            from organization.cli import build_plan
+            from organization.core import CtrustOrganizer
+            calculated = build_plan(project, sid)
+            diagnostics = CtrustOrganizer().validate(calculated)
+            if diagnostics:
+                recovery.update(code="organization_inputs_invalid", details=errors + [f"{item.owner}: {item.rule}" for item in diagnostics])
+            else:
+                recovery.update(action="organize", automatic=True)
+                command = shlex.join([".ctrust/sync.sh", "organize", ".", sid])
+        except (WorkflowError, ValueError, OSError) as exc:
+            recovery.update(code="organization_inputs_invalid", details=errors + [str(exc)])
+    elif stage.phase in {"contract_analysis", "modeling"}:
+        action, path = ("contract", root / f"contracts/units/{sid}.yaml") if stage.phase == "contract_analysis" else ("model", root / f"plans/units/{sid}-model.yaml")
+        if not path.exists():
+            recovery.update(action=action, automatic=True)
+            command = shlex.join([".ctrust/sync.sh", action, ".", sid])
+    recovery["command"] = command
+    return recovery
 
 
 def reconcile(project, root, state):
@@ -264,58 +448,115 @@ def reconcile(project, root, state):
         print("reconcile: preserved blocker and retry guard; resolve cause and use next explicitly")
         return
     sid = select_slice(entries, state)
+    recovery = None
     if not sid:
-        state.update(status="in_progress", phase="verification", next_action="Review final evidence and checkpoint before closing the workspace", next_skill="migration-verification", next_command="", active_unit="none", active_functions=[], active_function_ids=[], next_function="none", active_rust_file="", active_module_path="", active_evidence="")
+        state.update(status="in_progress", phase="verification", next_action="Review final evidence and checkpoint before closing the workspace", next_command="", next_skill="migration-verification", active_unit="none", active_functions=[], active_function_ids=[], next_function="none")
     else:
-        inventory = root / f"inventory/slices/{sid}"
-        phase, skill, command = "inventory", "c-code-inventory", ""
-        action = f"Complete inventory for {sid}"
+        phase, skill, command = "function_recovery", "c-to-rust-migration", ""
+        action = f"Resume next incomplete function in {sid}"
         if entries[sid][0].get("status") == "blocked":
             phase, skill, action = "blocked", "context-recovery", f"Resolve recorded blocker for {sid}"
-        elif inventory.is_dir() and any(inventory.iterdir()):
-            try:
-                prerequisites(root, sid, "contract")
-                ready = True
-            except WorkflowError:
-                ready = False
-            if not confirmed(inventory / "data-structures.yaml", STRUCTURE_FIELDS) or not (inventory / "mapping-confirmation.yaml").is_file() or load(inventory / "mapping-confirmation.yaml").get("status") != "confirmed" or load(inventory / "mapping-confirmation.yaml").get("counts", {}).get("unresolved") != 0:
-                phase, skill, action = "data_structure_mapping", "data-structure-mapping", f"Confirm structures and mapping for {sid}"
-            elif not ready:
-                phase, skill, action = "behavior_extraction", "c-behavior-extraction", f"Confirm behavior for {sid}"
-            elif not confirmed(root / f"contracts/units/{sid}.yaml"):
-                phase, skill, action = "contract_analysis", "contract-extraction", f"Complete and confirm contract for {sid}"
-                if not (root / f"contracts/units/{sid}.yaml").exists():
-                    command = f".ctrust/sync.sh contract . {sid}"
-            elif not confirmed(root / f"plans/units/{sid}-model.yaml"):
-                phase, skill, action = "modeling", "rust-domain-modeling", f"Complete and confirm model for {sid}"
-                if not (root / f"plans/units/{sid}-model.yaml").exists():
-                    command = f".ctrust/sync.sh model . {sid}"
+        else:
+            for stage in STAGES:
+                errors = stage_errors(root, sid, stage.phase)
+                if errors:
+                    recovery = recovery_for_stage(project, root, state, sid, stage, errors)
+                    phase, skill, command = stage.phase, stage.skill, recovery["command"]
+                    action = f"{stage.action} for {sid}: " + "; ".join(recovery["details"])
+                    break
             else:
-                try:
-                    from organization.cli import validate_persisted
-                    validate_persisted(project, sid)
-                    organization_ready = True
-                except (WorkflowError, ValueError):
-                    organization_ready = False
-                if not organization_ready:
-                    phase, skill, action = "organization", "rust-module-organization", f"Define and validate organization for {sid}"
-                    if not (root / f"plans/units/{sid}-organization.yaml").exists():
-                        command = ".ctrust/sync.sh organize ."
-                elif not (inventory / "function-map.yaml").exists():
-                    phase, skill, action = "inventory", "c-code-inventory", f"Create missing function map for {sid}"
+                _, data = read_map(root, sid, upgrade=True)
+                if all(f["state"] == "verified" for f in data["functions"]):
+                    phase, skill, action = "verification", "migration-verification", f"Run slice gates and checkpoint {sid}"
+                    command = shlex.join([".ctrust/sync.sh", "verify-slice", ".", sid])
                 else:
-                    _, data = read_map(root, sid, upgrade=True)
-                    if all(f["state"] == "verified" for f in data["functions"]):
-                        phase, skill, action = "verification", "migration-verification", f"Run slice gates and checkpoint {sid}"
-                    else:
-                        phase, skill, action = "function_recovery", "c-to-rust-migration", f"Resume next incomplete function in {sid}"
-                        command = f".ctrust/sync.sh select-function . {sid}"
+                    command = shlex.join([".ctrust/sync.sh", "select-function", ".", sid])
         if state.get("current_unit") != sid:
             state.update(active_unit="none", active_functions=[], active_function_ids=[], next_function="none", active_rust_file="", active_module_path="", active_evidence="", implementation_status="pending", test_status="pending", comparison_status="pending")
         state.update(current_unit=sid, status="blocked" if phase == "blocked" else "in_progress", phase=phase, next_action=action, next_skill=skill, next_command=command)
+    state["recovery"] = recovery
+    if state["status"] == "blocked":
+        state["eligible_actions"] = ["review"]
+    elif recovery:
+        state["eligible_actions"] = [recovery["action"]] if recovery["automatic"] else ["review"]
+    else:
+        state["eligible_actions"] = FUNCTION_ACTIONS[state["phase"]] if sid else ["final-review"]
     state["next_owner"] = "ctrust-lead"
     save(root, root / "migration.yaml", state)
     print(f"reconcile: slice={sid or 'none'} phase={state['phase']}")
+
+
+def recovery_signature(project, root, state, recovery):
+    digest = hashlib.sha256(recovery["command"].encode())
+    digest.update(sys.version.encode())
+    for package in ("networkx", "PyYAML"):
+        try:
+            digest.update(metadata.version(package).encode())
+        except metadata.PackageNotFoundError:
+            digest.update(f"missing:{package}".encode())
+    paths = set((root / "plans/units").glob("*-slices.yaml"))
+    sid = recovery["slice"]
+    paths.update((root / f"inventory/slices/{sid}").glob("*.yaml"))
+    paths.update([root / f"contracts/units/{sid}.yaml", root / f"plans/units/{sid}-model.yaml"])
+    if recovery["action"] == "inventory":
+        arguments = inventory_arguments(project, root, state, sid)
+        source = Path(arguments[arguments.index("--project") + 1])
+        paths.update(path for path in source.rglob("*") if path.is_file() and path.suffix in {".c", ".h", ".json"})
+    for path in sorted(paths):
+        digest.update(str(path).encode())
+        digest.update(path.read_bytes() if path.is_file() else b"missing")
+    return digest.hexdigest()
+
+
+def perform_setup(project, root, state, sid, command):
+    require_action(root, state, sid, command)
+    if command == "inventory":
+        result = subprocess.run(inventory_arguments(project, root, state, sid), text=True, capture_output=True)
+        if result.returncode:
+            raise ExecutionError(f"Inventory execution failed ({result.returncode}): {result.stderr or result.stdout}")
+        print(result.stdout.rstrip())
+    elif command == "organize":
+        from organization.cli import write_plan, validate_persisted
+        write_plan(project, sid)
+        validate_persisted(project, sid)
+        print(f"organization valid: {sid}")
+    else:
+        files = [("contract.yaml", f"contracts/units/{sid}.yaml"), ("unit-plan.md", f"plans/units/{sid}.md")] if command == "contract" else [("model.yaml", f"plans/units/{sid}-model.yaml")]
+        for template, relative in files:
+            path = root / relative
+            if path.exists():
+                print(f"preserved {path}")
+                continue
+            content = (Path(__file__).parent.parent / "templates" / template).read_text()
+            content = content.replace("UNIT_NAME", sid).replace("SLICE_ID", sid).replace("FUNCTION_NAME", "TODO_FUNCTION")
+            atomic_write(root, relative, content.encode())
+            print(f"created {path}")
+    reconcile(project, root, state)
+
+
+def run_setup(project, root, state, sid, command, previous_command=None):
+    require_action(root, state, sid, command)
+    recovery = {"slice": sid, "action": command, "command": shlex.join([".ctrust/sync.sh", command, ".", sid])}
+    signature = recovery_signature(project, root, state, recovery)
+    if state.get("attempts", 0) > 0 and state.get("failed_recovery_signature") == signature:
+        raise WorkflowError("Same recovery already failed with unchanged inputs; correct the cause before retrying")
+    prior = {"previous_command": previous_command or state.get("next_command"), "attempts": state.get("attempts", 0), "last_error": state.get("last_error", ""), "corrective_action": command}
+    if prior["attempts"] or prior["last_error"]:
+        state.setdefault("recovery_history", []).append(prior)
+    if state.get("failed_recovery_signature") or (previous_command is not None and previous_command != recovery["command"]):
+        state.update(attempts=0, last_error="")
+    try:
+        perform_setup(project, root, state, sid, command)
+    except (ExecutionError, OSError, TransactionError) as exc:
+        state.update(attempts=state.get("attempts", 0) + 1, last_error=str(exc), failure_kind="execution", failed_recovery_signature=signature)
+        if state["attempts"] >= state.get("max_attempts", 2):
+            state["status"] = "blocked"
+        save(root, root / "migration.yaml", state)
+        raise
+    else:
+        state.update(attempts=0, last_error="", failure_kind="none")
+        state.pop("failed_recovery_signature", None)
+        save(root, root / "migration.yaml", state)
 
 
 def operate(project, command, args):
@@ -337,6 +578,31 @@ def operate(project, command, args):
             return
         if state.get("version") != 2:
             raise WorkflowError("Migration state requires schema v2; run upgrade-state first")
+        if command == "guard-action":
+            return require_action(root, state, args[0], args[1])
+        if command in {"inventory", "contract", "model", "organize"}:
+            sid = args[0] if args and args[0] not in {"", "checkpoint"} else state.get("current_unit")
+            return run_setup(project, root, state, sid, command)
+        if command == "recover":
+            if state.get("status") == "blocked" or state.get("attempts", 0) >= state.get("max_attempts", 2):
+                raise WorkflowError("Recovery preserves blockers; resolve the cause and use next before recovering")
+            previous_action = state.get("next_command")
+            reconcile(project, root, state)
+            recovery = state.get("recovery")
+            if not recovery or not recovery.get("automatic"):
+                print("Recovery requires analysis: " + state.get("next_action", ""))
+                return
+            return run_setup(project, root, state, recovery["slice"], recovery["action"], previous_action)
+        if command == "update-state":
+            key, value = args
+            allowed = {"status", "next_action", "next_command", "attempts", "last_error", "last_checkpoint"}
+            if key not in allowed:
+                raise WorkflowError(f"Unsupported state field: {key}")
+            state[key] = int(value) if key == "attempts" else value
+            if key == "status" and value == "blocked":
+                state["eligible_actions"] = ["review"]
+            save(root, root / "migration.yaml", state)
+            return
         if command == "sync-context":
             from artifact_sync.engine import _managed_block
             path = root / "current-context.md"
@@ -402,8 +668,7 @@ def operate(project, command, args):
             return
         if command == "verify-slice":
             sid = args[0] or state.get("current_unit")
-            if state.get("status") == "blocked":
-                raise WorkflowError("Resolve the blocker before verifying the slice")
+            require_action(root, state, sid, command)
             entries = manifests(root)
             if select_slice(entries, state) != sid:
                 raise WorkflowError("Only the active eligible slice can be verified")
@@ -413,7 +678,7 @@ def operate(project, command, args):
             item, path, data = entries[sid]
             item["status"] = "verified"
             save(root, path, data)
-            state.update(status="in_progress", phase="verification", next_command="", next_action=f"Checkpoint verified slice {sid}, then reconcile", next_skill="context-recovery")
+            state.update(status="in_progress", phase="verification", next_command="", next_action=f"Checkpoint verified slice {sid}, then reconcile", next_skill="context-recovery", eligible_actions=["checkpoint"], recovery=None)
             save(root, root / "migration.yaml", state)
             return
         if command == "reconcile":
@@ -426,13 +691,11 @@ def operate(project, command, args):
             raise WorkflowError(f"Unknown slice: {sid}")
         path, data = read_map(root, sid, upgrade=command in {"function-map", "select-function"})
         if command == "function-map":
+            require_action(root, state, sid, command)
             save(root, path, data)
             print(f"function-map valid: slice={sid}, functions={len(data['functions'])}")
             return
-        if state.get("status") == "blocked" or state.get("attempts", 0) >= state.get("max_attempts", 2):
-            raise WorkflowError("Migration blocked; resolve the cause and record a different next action")
-        if select_slice(entries, state) != sid:
-            raise WorkflowError(f"Slice {sid} is not eligible or another slice is active")
+        require_action(root, state, sid, command)
         if command == "select-function":
             prerequisites(root, sid, "port")
             unfinished = [f for f in data["functions"] if f["state"] not in {"verified", "blocked"}]
@@ -502,10 +765,14 @@ def operate(project, command, args):
                     complete = all(f["state"] == "verified" for f in data["functions"])
                     save(root, root / f"inventory/slices/{sid}/comparison.yaml", {"version": 1, "slice": sid, "status": "passed" if complete else "in_progress", "functions": [{"function_id": f["function_id"], "comparison_status": f.get("comparison_status", "pending"), "evidence_refs": f.get("evidence_refs", [])} for f in data["functions"]]})
                     if complete:
-                        state.update(phase="verification", next_skill="migration-verification", next_action=f"Run migration-gate for {sid}, then checkpoint and mark slice verified")
+                        state.update(phase="verification", next_skill="migration-verification", next_action=f"Run migration-gate for {sid}, then checkpoint and mark slice verified", next_command=shlex.join([".ctrust/sync.sh", "verify-slice", ".", sid]))
+                    else:
+                        state["next_command"] = shlex.join([".ctrust/sync.sh", "select-function", ".", sid])
         data["revision"] += 1
         save(root, path, data)
         state["function_map_revision"] = data["revision"]
+        state["eligible_actions"] = ["review"] if state.get("status") == "blocked" else FUNCTION_ACTIONS[state["phase"]]
+        state["recovery"] = None
         save(root, root / "migration.yaml", state)
         audit = root / "logs/progress.ndjson"
         audit.parent.mkdir(parents=True, exist_ok=True)
@@ -531,17 +798,16 @@ def gate(project, kind, scope=""):
         raise WorkflowError("Migration gates require initialized .ctrust state")
     for sid in scoped_slices(root, scope):
         inventory = root / f"inventory/slices/{sid}"
-        if kind == "prerequisites":
+        require_inventory(root, sid)
+        if kind == "inventory":
+            pass
+        elif kind == "prerequisites":
             prerequisites(root, sid, "port")
         elif kind == "structures":
-            if not confirmed(inventory / "data-structures.yaml", STRUCTURE_FIELDS):
-                raise WorkflowError(f"Data structures not fully confirmed: {sid}")
-            mapping = load(inventory / "mapping-confirmation.yaml")
-            if mapping.get("status") != "confirmed" or mapping.get("counts", {}).get("unresolved") != 0:
-                raise WorkflowError(f"Mapping unresolved or unconfirmed: {sid}")
+            require_confirmed(inventory / "data-structures.yaml", STRUCTURE_FIELDS)
+            require_mapping(inventory / "mapping-confirmation.yaml")
         elif kind == "behavior":
-            if not confirmed(inventory / "behavior.yaml", BEHAVIOR_FIELDS):
-                raise WorkflowError(f"Behavior not fully confirmed: {sid}")
+            require_confirmed(inventory / "behavior.yaml", BEHAVIOR_FIELDS)
         elif kind in {"functions", "comparison", "sources"}:
             _, data = read_map(root, sid)
             for fn in data["functions"]:
@@ -574,7 +840,14 @@ def main():
     args, extra = parser.parse_known_args()
     values = args.args + extra
     try:
-        if args.command == "gate":
+        if args.command == "read-state":
+            value = load(args.project.resolve() / ".ctrust/migration.yaml")
+            for key in values:
+                value = value.get(key, "") if isinstance(value, dict) else ""
+            print(value)
+        elif args.command == "check-confirmed":
+            require_confirmed(args.project.resolve() / ".ctrust" / values[0])
+        elif args.command == "gate":
             gate(args.project.resolve(), values[0], values[1] if len(values) > 1 else "")
         elif args.command == "scan-files":
             project = args.project.resolve()

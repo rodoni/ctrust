@@ -119,6 +119,49 @@ Os gates usam o slice ativo por padrão. Um segundo argumento seleciona um slice
 
 `reconcile` preserva bloqueios, erros e tentativas. Depois de corrigir a causa, registre uma ação diferente com `next`; isso reabre explicitamente o slice/unidade bloqueado, preservando o estágio anterior. Reconciliar não reabre trabalho bloqueado.
 
+### Validação determinística de pré-requisitos
+
+Antes de avançar, o controlador exige os nove artefatos gerados pelo inventário do slice: `manifest.yaml`, `symbols.yaml`, `function-map.yaml`, `dependencies.yaml`, `callers.yaml`, `files.yaml`, `data-structures.yaml`, `mapping-confirmation.yaml` e `behavior.yaml`. O gate valida YAML, campos estruturais e o ID do slice quando declarado. Arquivos complementares, como riscos e includes não resolvidos, continuam sujeitos à análise especializada.
+
+```bash
+.ctrust/scripts/inventory-gate.sh . <slice-id>
+.ctrust/scripts/inventory-gate.sh . --all
+```
+
+Se o inventário estiver parcial ou inválido, `reconcile` mantém a fase `inventory`, seleciona `c-code-inventory` e lista os problemas na próxima ação. Contrato, modelo, organização e seleção de função não avançam com inventário incompleto. A reconciliação não reexporta automaticamente: o agente deve preservar análises e confirmações existentes antes de completar os artefatos.
+
+As confirmações são validadas pelo parser YAML em Python. `status: confirmed` e `status: "confirmed"` são equivalentes. Campos de `completion` exigem booleanos `true`, e `counts.unresolved` exige o inteiro `0`. Os diagnósticos indicam arquivo, campo, valor esperado e observado; marcar um status não substitui análise e evidência. A validação da organização também informa os campos divergentes do plano calculado.
+
+As atualizações do estado feitas pelo shell usam a serialização YAML do controlador, com lock e escrita atômica, preservando mensagens com aspas, dois-pontos e múltiplas linhas.
+
+### Transições e recuperação por etapa
+
+`tools/workflow_stages.py` declara a sequência de etapas e os pré-requisitos de cada comando. `contract`, `model`, `organize`, seleção de função e registros de implementação/evidência validam a sequência anterior e o slice elegível. O campo `phase` é uma projeção dos artefatos: editá-lo não libera um salto de etapa. As transições de cada função continuam sujeitas a `UnitState`.
+
+O controlador persiste `recovery` (código, etapa, ação, comando, detalhes e indicação de operação mecânica) e `eligible_actions`. O resumo de retomada também mostra `RECOVERY_CODE` e `RECOVERY_ACTION`.
+
+```bash
+.ctrust/sync.sh reconcile .
+.ctrust/sync.sh resume . --brief
+.ctrust/sync.sh recover .
+```
+
+`recover` recalcula o estado e executa **uma** operação mecânica elegível: inventário a partir do escopo declarado, criação de template ausente ou regeneração de organização desatualizada. Se as entradas da organização forem inválidas, faltar origem/header/função ou houver análise pendente, registra a tarefa para a skill responsável sem inventar dados nem consumir uma tentativa de execução. Um inventário parcial com análises confirmadas ou enriquecidas exige revisão e não é sobrescrito automaticamente.
+
+Falhas de execução dos comandos mecânicos são registradas pelo próprio controlador. Não registre `failed` novamente para a mesma falha já contabilizada. A repetição de uma recuperação com entradas inalteradas é rejeitada; corrigir entradas permite uma nova ação, preservando a falha anterior em `recovery_history`. `recover` não reabre estados bloqueados nem contorna `max_attempts`; nesses casos, corrija a causa e registre uma ação diferente com `next`.
+
+### Publicação transacional do inventário
+
+```bash
+.ctrust/sync.sh inventory . <slice-id>
+```
+
+O comando deriva origem, headers e funções do manifesto. O exportador gera e valida os nove YAMLs em staging e publica o diretório completo. Na substituição de um inventário existente, usa a troca atômica de diretórios do Linux (`renameat2`); se o sistema não suportar essa operação, preserva o inventário atual e reporta a falha.
+
+Cada geração possui um ID e hashes dos artefatos. Journals e versões anteriores ficam em `.ctrust/inventory/slices/.inventory-transactions/<generation>/`; após uma troca, `snapshot/` guarda a versão anterior. Uma interrupção antes da publicação preserva o inventário atual; depois da troca, as duas gerações completas permanecem disponíveis. A próxima exportação reconcilia os journals interrompidos. Locks do workspace e da publicação são liberados pelo sistema operacional quando o processo termina, inclusive por interrupção abrupta.
+
+O exportador preserva arquivos complementares e rejeita a substituição automática de análises confirmadas, funções em andamento ou artefatos enriquecidos desde a geração. Após revisar as entradas e a necessidade de reexportar, a opção `--replace-reviewed` do exportador permite arquivar e substituir conscientemente uma versão revisada. Ela não é utilizada por `recover`.
+
 `reconcile-artifacts` sincroniza blocos gerenciados em todos os planos; não seleciona slices nem atualiza o estado operacional. Use `reconcile` para atualizar `migration.yaml`, depois `reconcile-artifacts` para atualizar os blocos dos planos. `validate-artifacts` lê e valida sem escrever.
 
 ### Destinos disponíveis
@@ -146,6 +189,26 @@ O destino `generic` é recomendado quando o projeto não usa um cliente específ
 ./sync.sh validate-organization /caminho/para/projeto
 ./sync.sh clean generic /caminho/para/projeto
 ```
+
+## Teste executável com código C real
+
+O exemplo [bounded-strings](examples/bounded-strings/README.md) percorre o fluxo
+com um recorte de duas funções da libc do OpenBSD (`strlcpy` e `strlcat`),
+convertidas para Rust seguro. Ele compila a referência C, gera inventário e grafo,
+registra contratos/modelos, testa a recuperação por função e compara 324 casos
+C/Rust antes de executar os gates. Também verifica que avanços fora de ordem
+são bloqueados.
+
+```bash
+.venv/bin/python examples/bounded-strings/run.py
+# Com acesso à internet, baixar as fontes diretamente:
+.venv/bin/python examples/bounded-strings/run.py --download
+```
+
+A execução padrão usa um snapshot das fontes obtido por consulta web, com
+whitespace normalizado; não depende de rede. Cada execução cria um diretório
+novo com relatório, código convertido, inventário e evidências. Veja o README
+do exemplo para pré-requisitos, procedência e limites da paridade demonstrada.
 
 ## Memória persistente e recuperação de contexto
 
