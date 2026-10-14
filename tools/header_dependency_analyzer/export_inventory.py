@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import re
 import sys
 from pathlib import Path
 
@@ -13,7 +12,7 @@ import networkx as nx
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from inventory_transaction import publish_inventory
 from artifact_sync.transaction import TransactionError
-from analyze import analyze, parse_file
+from analyze import analyze, parse_file_cached
 
 
 def scalar(value):
@@ -75,13 +74,27 @@ def write_yaml(path, value):
 
 
 def merge_analyses(project, headers, compile_commands, cache_dir=None, root_functions=None):
+    project = Path(project).expanduser().resolve()
+    headers = list(dict.fromkeys(Path(header).expanduser().resolve() for header in headers))
+    selections = {}
+    if root_functions is not None:
+        requested = list(dict.fromkeys(root_functions))
+        available = set()
+        for header in headers:
+            if not header.is_file() or not header.is_relative_to(project):
+                raise ValueError('Header must exist inside the project directory')
+            _, declarations, _ = parse_file_cached(header, cache_dir)
+            available.update(declarations)
+            selections[header] = [name for name in requested if name in declarations]
+        missing = [name for name in requested if name not in available]
+        if missing:
+            raise ValueError('Requested functions are not declared in the supplied headers: ' + ', '.join(missing))
     graph = nx.DiGraph()
     reports = []
     for header in headers:
         selected_functions = root_functions
         if root_functions is not None:
-            _, declarations = parse_file(header)
-            selected_functions = [name for name in root_functions if name in declarations]
+            selected_functions = selections[header]
             if not selected_functions:
                 continue
         current_graph, report = analyze(project, header, compile_commands, cache_dir, selected_functions)
@@ -91,17 +104,20 @@ def merge_analyses(project, headers, compile_commands, cache_dir=None, root_func
     if root_functions is not None and not reports:
         raise ValueError("None of the requested functions is declared in the supplied headers")
 
+    def unique(field):
+        return list({json.dumps(entry, sort_keys=True): entry for item in reports for entry in item.get(field, [])}.values())
+
     report = {
         "analyzer_version": reports[0].get("analyzer_version", "unknown") if reports else "unknown",
         "project": str(project.resolve()),
         "headers": [item["header"] for item in reports],
-        "roots": [root for item in reports for root in item["roots"]],
-        "unresolved_calls": [entry for item in reports for entry in item["unresolved_calls"]],
-        "ambiguous_calls": [entry for item in reports for entry in item["ambiguous_calls"]],
-        "indirect_calls": [entry for item in reports for entry in item["indirect_calls"]],
-        "structures": [entry for item in reports for entry in item.get("structures", [])],
-        "cycles": [entry for item in reports for entry in item.get("cycles", [])],
-        "definitions_indexed": sum(item["definitions_indexed"] for item in reports),
+        "roots": unique("roots"),
+        "unresolved_calls": unique("unresolved_calls"),
+        "ambiguous_calls": unique("ambiguous_calls"),
+        "indirect_calls": unique("indirect_calls"),
+        "structures": unique("structures"),
+        "cycles": unique("cycles"),
+        "definitions_indexed": max((item["definitions_indexed"] for item in reports), default=0),
         "files_indexed": max((item["files_indexed"] for item in reports), default=0),
     }
     if reports and "compile_commands" in reports[0]:
@@ -144,22 +160,21 @@ def compact_structures(structures, graph):
     for _, attrs in graph.nodes(data=True):
         referenced.update(attrs.get("type_references", []))
 
-    by_name = {item.get("name"): item for item in structures if item.get("name")}
+    by_id = {item["id"]: item for item in structures}
     queue = list(referenced)
     while queue:
-        name = queue.pop()
-        structure = by_name.get(name)
+        ident = queue.pop()
+        structure = by_id.get(ident)
         if not structure:
             continue
-        field_text = " ".join(field.get("declaration", "") for field in structure.get("fields", []))
-        for candidate in by_name:
-            if candidate not in referenced and re.search(rf"\b{re.escape(candidate)}\b", field_text):
+        for candidate in structure.get("type_references", []):
+            if candidate not in referenced:
                 referenced.add(candidate)
                 queue.append(candidate)
 
     compact = []
     for structure in structures:
-        if structure.get("name") not in referenced:
+        if structure["id"] not in referenced:
             continue
         fields = []
         for field in structure.get("fields", []):
@@ -172,7 +187,9 @@ def compact_structures(structures, graph):
             })
         declaration = structure.get("declaration", {})
         compact.append({
+            "id": structure["id"],
             "name": structure.get("name", ""),
+            "aliases": structure.get("aliases", []),
             "kind": structure.get("kind", ""),
             "declaration": compact_location(declaration),
             "mapping": {"message_dto": "", "domain": "", "strategy": "unresolved", "exclusion_reason": ""},
@@ -213,7 +230,7 @@ def behavior_for_graph(graph, report, slice_id, mode="compact"):
         "completion": {
             "source_logic_read": False,
             "branches_mapped": bool(functions),
-            "calls_mapped": not bool(report["unresolved_calls"] or report["ambiguous_calls"]),
+            "calls_mapped": bool(report["roots"]) and all(root["status"] == "resolved" for root in report["roots"]) and not bool(report["unresolved_calls"] or report["ambiguous_calls"] or report["indirect_calls"]),
             "errors_mapped": False,
             "side_effects_mapped": False,
             "test_cases_defined": False,
@@ -329,7 +346,7 @@ def main():
     parser.add_argument("--slice", required=True)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--compile-commands", type=Path)
-    parser.add_argument("--function", action="append", default=[], help="Function declared in the input header and belonging to this slice; repeat for multiple roots")
+    parser.add_argument("--function", action="append", help="Function declared or defined in an input header; repeat for multiple roots; omit to select all header functions")
     parser.add_argument("--cache-dir", type=Path)
     parser.add_argument("--mode", choices=("compact", "full"), default="compact")
     parser.add_argument("--replace-reviewed", action="store_true", help="Explicitly archive and replace an enriched or confirmed inventory")
