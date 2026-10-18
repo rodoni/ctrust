@@ -1,12 +1,17 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, Literal, Optional
 
 CrateKind = Literal["library", "binary"]
+
 
 @dataclass(frozen=True)
 class FunctionInput:
     c_name: str
     rust_name: str = ""
+    function_id: str = ""
+    definition_file: str = ""
+    definition_line: Optional[int] = None
+
 
 @dataclass(frozen=True)
 class SliceInput:
@@ -17,6 +22,7 @@ class SliceInput:
     functions: tuple[FunctionInput, ...] = ()
     test_cases: tuple[str, ...] = ()
     name_override: Optional[str] = None
+
 
 @dataclass(frozen=True)
 class OrganizationInput:
@@ -30,6 +36,7 @@ class OrganizationInput:
     schema_version: int = 1
     naming_rule_version: str = "semantic-v1"
 
+
 @dataclass(frozen=True)
 class Diagnostic:
     rule: str
@@ -39,6 +46,7 @@ class Diagnostic:
     source_inputs: tuple[str, ...] = ()
     remediation: str = ""
     blocking: bool = True
+
 
 @dataclass(frozen=True)
 class SliceOrganization:
@@ -51,8 +59,10 @@ class SliceOrganization:
     test_file: str
     module_path: str
     functions: tuple[str, ...]
+    symbols: tuple[dict, ...]
     test_cases: tuple[str, ...]
     naming_rule: str
+
 
 @dataclass(frozen=True)
 class OrganizationPlan:
@@ -67,6 +77,8 @@ class OrganizationPlan:
     shared_type_file: str
     slices: tuple[SliceOrganization, ...]
     errors: tuple[Diagnostic, ...] = ()
+    symbol_map: tuple[dict, ...] = ()
+
 
 @dataclass(frozen=True)
 class OrganizationError(Exception):

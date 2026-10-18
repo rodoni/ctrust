@@ -33,8 +33,11 @@ def yaml_lines(value, indent=0):
                 for key, child in item.items():
                     marker = "- " if first else "  "
                     if isinstance(child, (dict, list)):
-                        lines.append(f"{prefix}{marker}{key}:")
-                        lines.extend(yaml_lines(child, indent + 4))
+                        if not child:
+                            lines.append(f"{prefix}{marker}{key}: {'[]' if isinstance(child, list) else '{}'}")
+                        else:
+                            lines.append(f"{prefix}{marker}{key}:")
+                            lines.extend(yaml_lines(child, indent + 4))
                     else:
                         lines.append(f"{prefix}{marker}{key}: {scalar(child)}")
                     first = False
@@ -61,6 +64,7 @@ def plan_to_dict(plan: OrganizationPlan) -> dict:
             {"role": "entry", "path": plan.entry_file},
             {"role": "shared_types", "path": plan.shared_type_file},
         ],
+        "symbols": [dict(symbol) for symbol in plan.symbol_map],
         "slices": [
             {
                 "id": item.slice_id,
@@ -73,6 +77,7 @@ def plan_to_dict(plan: OrganizationPlan) -> dict:
                 "module_path": item.module_path,
                 "naming_rule": item.naming_rule,
                 "functions": list(item.functions),
+                "symbols": [dict(symbol) for symbol in item.symbols],
                 "test_cases": list(item.test_cases),
             }
             for item in plan.slices

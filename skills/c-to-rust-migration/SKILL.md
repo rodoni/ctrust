@@ -149,3 +149,29 @@ Depois leia o plano, o contrato, o modelo e o checkpoint apontados pelo estado. 
 ## Progresso por função
 
 Use `select-function` para criar ou retomar a unidade indicada pelo estado. Preserve `active_unit` e `active_function_ids`; o nome C não substitui a identidade da função. Registre implementação com `record-implementation`, testes com `record-evidence` e classificação com `compare`. O controlador rejeita arquivos inexistentes, unidades diferentes da ativa e saltos de estágio. A comparação cobre `normal`, `boundary` e `error` com expected results independentes. Ao concluir as funções, execute `verify-slice`; ele executa gates/Cargo, cria checkpoint e só então avança o slice. Não promova slices manualmente para contornar gates.
+
+### Registro robusto de evidência
+
+`record-evidence` aceita o caminho relativo/absoluto do NDJSON, `auto` ou argumento vazio. Com `auto`, procura primeiro `.ctrust/evidence/<slice-id>/<c_name>.ndjson`, depois `.ctrust/evidence/<slice-id>/<rust_name>.ndjson` e por fim `.ctrust/evidence/tests/<unit-id>.ndjson`. Passar apenas o nome da função também usa essa resolução quando existe um único candidato. Se não houver arquivo ou houver mais de um candidato, informe o caminho completo; não trate o nome da função como caminho na raiz do projeto.
+
+```bash
+.ctrust/sync.sh record-evidence . <unit-id> auto
+# ou
+.ctrust/sync.sh record-evidence . <unit-id> .ctrust/evidence/<slice-id>/<function>.ndjson
+```
+
+### Registro da implementação Rust
+
+`record-implementation` registra somente o arquivo Rust e o módulo canônico; não recebe descrição textual nem caminho de evidência. O destino pode ser resolvido pelo plano com `auto`:
+
+```bash
+.ctrust/sync.sh record-implementation . <unit-id> auto <module-path>
+```
+
+Ou pode ser informado explicitamente:
+
+```bash
+.ctrust/sync.sh record-implementation . <unit-id> crates/<crate>/src/<file>.rs crate::<module>
+```
+
+A evidência NDJSON é registrada separadamente com `record-evidence`. O ctrust rejeita destinos inexistentes ou descrições usadas como caminho Rust.

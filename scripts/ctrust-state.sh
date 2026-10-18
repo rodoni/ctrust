@@ -18,6 +18,8 @@ Usage: ./ctrust-state.sh <command> [project] [args...]
 Commands:
   init       [project] Initialize a persistent ctrust migration workspace
   upgrade-state [project] Upgrade legacy migration.yaml to schema version 2
+  doctor     [project] Run non-destructive state/artifact consistency diagnostics
+  behavior-function [project] <slice> <function> Review one behavior artifact
   status     [project] Show the compact migration state
   status-slices [project] Generate the per-slice migration cycle table
   reconcile-artifacts [project] Reconcile .ctrust artifacts deterministically
@@ -30,8 +32,8 @@ Commands:
   resume     [project] [--brief|--full] Print recovery context (default --brief)
   function-map [project] [slice] Validate/enrich function-level map
   select-function [project] [slice] Select the next function unit
-  record-implementation [project] <unit> <rust_file> <module_path> Record implementation
-  record-evidence [project] <unit> <evidence_path> Record test evidence
+  record-implementation [project] <unit> [rust_file|auto] <module_path> Record implementation
+  record-evidence [project] <unit> [evidence_path|auto] Record test evidence; auto uses the active function convention
   verify-slice [project] [slice] Run gates, checkpoint and advance
   compare [project] <unit> <passed|failed> Record C/Rust comparison
   resume     [project] [--brief|--full] Print recovery context (default --brief)
@@ -311,6 +313,10 @@ record_evidence() {
 
 compare_function() {
     require_workspace
+    if [ -n "$ARG5" ]; then
+        echo "Invalid compare arguments: use compare <unit-id> <passed|failed>; the active function is already stored in migration.yaml." >&2
+        return 2
+    fi
     workflow_run compare "$TITLE" "$MODE"
     sync_context
     status_slices >/dev/null
@@ -591,6 +597,15 @@ case "$COMMAND" in
         ;;
     recover)
         recover
+        ;;
+    doctor)
+        require_workspace
+        workflow_run doctor
+        ;;
+    behavior-function)
+        require_workspace
+        workflow_run behavior-function "$TITLE" "$MODE"
+        sync_context
         ;;
     init)
         init_workspace

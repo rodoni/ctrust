@@ -1,0 +1,7 @@
+version: 1
+unit: UNIT_NAME
+crate_root: ""
+symbols: []
+
+# One canonical Rust identity per C function_id.
+# A dependent slice references owner_slice/rust_path and does not rename the symbol.

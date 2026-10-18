@@ -44,6 +44,37 @@ class SyncVerificationTests(unittest.TestCase):
                 result = self.run_controller(project / '.ctrust/sync.sh', 'verify')
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(f'Missing component: {project}/.kilo/{component}/', result.stderr)
+    def test_update_refreshes_managed_components_without_touching_migration_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / 'project'
+            result = self.run_controller(REPO / 'sync.sh', 'generic', project)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            managed = project / '.ctrust/tools/workflow.py'
+            migration = project / '.ctrust/migration.yaml'
+            managed.write_text('local old controller copy\n')
+            migration.write_text('version: 2\nstatus: in_progress\n')
+            result = self.run_controller(REPO / 'sync.sh', 'generic', 'update', project)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(managed.read_bytes(), (REPO / 'tools/workflow.py').read_bytes())
+            self.assertEqual(migration.read_text(), 'version: 2\nstatus: in_progress\n')
+            self.assertIn('updated', result.stdout)
+
+    def test_update_form_works_for_kilocode_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp)
+            result = self.run_controller(REPO / 'sync.sh', 'kilocode', project)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            managed = project / '.ctrust/tools/workflow.py'
+            managed.write_text('stale deployed workflow\n')
+            result = self.run_controller(REPO / 'sync.sh', 'kilocode', 'update', project)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(managed.read_bytes(), (REPO / 'tools/workflow.py').read_bytes())
+
+    def test_update_unknown_target_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.run_controller(REPO / 'sync.sh', 'update', 'unknown', tmp)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('Unknown update target', result.stderr)
 
 
 if __name__ == '__main__':

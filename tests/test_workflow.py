@@ -83,7 +83,22 @@ class WorkflowTests(unittest.TestCase):
     def implementation(self, unit):
         self.command('record-implementation', unit, self.rust_file, self.module_path)
 
-    def test_exact_function_update_and_distinct_units(self):
+    def test_record_implementation_resolves_canonical_destination_with_auto(self):
+        self.ready(names=('foo',))
+        self.command('select-function', 'demo-001')
+        unit = self.read()['active_unit']
+        self.command('record-implementation', unit, 'auto', self.module_path)
+        fn = self.read('inventory/slices/demo-001/function-map.yaml')['functions'][0]
+        self.assertEqual(fn['rust_file'], self.rust_file)
+        self.assertEqual(fn['module_path'], self.module_path)
+
+    def test_record_implementation_rejects_description_as_destination(self):
+        self.ready(names=('foo',))
+        self.command('select-function', 'demo-001')
+        unit = self.read()['active_unit']
+        result = self.command('record-implementation', unit, 'Implement foo behavior', self.module_path, success=False)
+        self.assertIn('expects a Rust file path', result.stdout + result.stderr)
+
         self.ready()
         self.command('select-function', 'demo-001')
         unit = self.read()['active_unit']
@@ -139,6 +154,72 @@ class WorkflowTests(unittest.TestCase):
         (self.project / 'src/future.rs').write_text('pub fn later() { unimplemented!(); }\n')
         self.gate('migration-completeness.sh')
         self.assertTrue(self.read('inventory/slices/demo-001/function-map.yaml')['functions'][0]['evidence_refs'])
+
+    def test_record_evidence_resolves_default_unit_path(self):
+        self.ready(names=('foo',))
+        self.command('select-function', 'demo-001')
+        unit = self.read()['active_unit']
+        self.implementation(unit)
+        relative = self.evidence(unit)
+        self.command('record-evidence', unit)
+        function = self.read('inventory/slices/demo-001/function-map.yaml')['functions'][0]
+        self.assertEqual(function['evidence_refs'], [relative])
+        self.assertEqual(self.read()['active_evidence'], relative)
+
+    def test_record_evidence_accepts_function_name_when_default_slice_file_exists(self):
+        self.ready(names=('foo',))
+        self.command('select-function', 'demo-001')
+        unit = self.read()['active_unit']
+        self.implementation(unit)
+        source = self.project / self.evidence(unit)
+        target = self.state / 'evidence/demo-001/foo.ndjson'
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source.read_text())
+        source.unlink()
+        self.command('record-evidence', unit, 'foo')
+        self.assertEqual(self.read()['active_evidence'], '.ctrust/evidence/demo-001/foo.ndjson')
+
+    def test_record_evidence_reports_actionable_missing_path(self):
+        self.ready(names=('foo',))
+        self.command('select-function', 'demo-001')
+        unit = self.read()['active_unit']
+        self.implementation(unit)
+        result = self.command('record-evidence', unit, 'missing.ndjson', success=False)
+        self.assertIn('Evidence file not found', result.stdout)
+        self.assertIn('record-evidence <unit-id> <evidence-path>', result.stdout)
+
+    def test_doctor_passes_without_shadow_state_after_artifacts_are_ready(self):
+        self.ready(names=('foo',))
+        result = self.command('doctor')
+        self.assertIn('Doctor passed', result.stdout)
+
+    def test_doctor_detects_conflicting_root_shadow_state(self):
+        self.ready(names=('foo',))
+        (self.project / 'migration.yaml').write_text('version: 1\nstatus: scoped\n')
+        result = self.command('doctor', success=False)
+        self.assertIn('shadow', result.stdout.lower())
+
+    def test_doctor_detects_non_ndjson_evidence_reference(self):
+        self.ready(names=('foo',))
+        data = self.read('inventory/slices/demo-001/function-map.yaml')
+        data['functions'][0].update(state='tested', test_status='passed', evidence_refs=['src/foo.rs'])
+        self.write('inventory/slices/demo-001/function-map.yaml', data)
+        result = self.command('doctor', success=False)
+        self.assertIn('not NDJSON', result.stdout)
+
+    def test_behavior_function_loads_one_persisted_artifact(self):
+        self.ready(names=('foo',))
+        artifact = self.state / 'inventory/slices/demo-001/behavior/functions/foo.yaml'
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text('function_id: c:foo.c:1:foo\nc_name: foo\n')
+        result = self.command('behavior-function', 'demo-001', 'foo')
+        self.assertIn('function_id: c:foo.c:1:foo', result.stdout)
+        self.assertEqual(self.read()['active_functions'], ['foo'])
+
+        self.ready(names=('foo',))
+        self.command('select-function', 'demo-001')
+        result = self.command('compare', 'demo-001', 'foo', 'passed', success=False)
+        self.assertIn('compare <unit-id> <passed|failed>', result.stdout + result.stderr)
 
     def test_no_reference_verification_requires_reason_and_independent_cases(self):
         self.ready(names=('foo',))
@@ -461,6 +542,36 @@ class WorkflowTests(unittest.TestCase):
                 path.write_bytes(original)
         self.command('reconcile')
         self.assertEqual(self.read()['phase'], 'function_recovery')
+
+    def test_organization_aggregates_function_level_behavior_cases(self):
+        self.ready(names=('foo',))
+        path = 'inventory/slices/demo-001/behavior.yaml'
+        behavior = self.read(path)
+        behavior['functions'] = [{'c_name': 'foo', 'test_cases': [{'input': {'value': 1}, 'expected': 2}]}]
+        self.write(path, behavior)
+        manifest = self.read('plans/units/demo-slices.yaml')
+        del manifest['slices'][0]['characterization_tests']
+        self.write('plans/units/demo-slices.yaml', manifest)
+        self.command('organize')
+        plan = self.read('plans/units/demo-001-organization.yaml')
+        self.assertEqual(plan['slices'][0]['test_cases'], ['foo-case-1'])
+
+    def test_confirmation_accepts_legacy_nested_behavior_status(self):
+        self.ready(names=('foo',))
+        path = 'inventory/slices/demo-001/behavior.yaml'
+        data = self.read(path)
+        data['completion']['status'] = data.pop('status')
+        self.write(path, data)
+        self.gate('behavior-gate.sh')
+
+    def test_confirmation_rejects_conflicting_root_and_nested_status(self):
+        self.ready(names=('foo',))
+        path = 'inventory/slices/demo-001/behavior.yaml'
+        data = self.read(path)
+        data['completion']['status'] = 'draft'
+        self.write(path, data)
+        result = self.gate('behavior-gate.sh', success=False)
+        self.assertIn('conflicting confirmation status', result.stdout + result.stderr)
 
     def test_inventory_gate_accepts_drafts_but_confirmation_still_blocks(self):
         self.ready(names=('foo',))

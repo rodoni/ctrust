@@ -98,7 +98,27 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(by_name['missing']['state'], 'blocked')
         self.assertEqual(by_name['root']['evidence_refs'], [])
 
-    def test_compile_commands_selects_sources_and_reports_metadata(self):
+    def test_behavior_export_is_scoped_to_roots_and_preserves_transitive_dependencies(self):
+        from export_inventory import export_slice
+        temp, root = self.make_project()
+        self.addCleanup(temp.cleanup)
+        header = root / 'include/api.h'
+        header.write_text('void root(void);\n')
+        (root / 'src/api.c').write_text('void leaf(void) {}\nvoid root(void) { leaf(); }\n')
+        output = root / 'inventory'
+        export_slice(root, [header], output, 'demo-001', root_functions=['root'])
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+        from workflow import load
+        behavior = load(output / 'behavior.yaml')
+        self.assertEqual([item['c_name'] for item in behavior['functions']], ['root'])
+        self.assertTrue((output / 'behavior/functions/root.yaml').is_file())
+        self.assertEqual(behavior['functions'][0]['artifact'], 'behavior/functions/root.yaml')
+        self.assertEqual(behavior['scope']['reachable_functions'], ['src/api.c:1:leaf', 'src/api.c:2:root'])
+        self.assertEqual(behavior['references'][0]['c_name'], 'leaf')
+        dependencies = load(output / 'dependencies.yaml')
+        self.assertEqual(len(dependencies['edges']), 1)
+
         temp, root = self.make_project()
         self.addCleanup(temp.cleanup)
         header = root / 'include' / 'api.h'

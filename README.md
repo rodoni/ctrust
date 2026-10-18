@@ -37,6 +37,8 @@ ctrust/
 ├── tools/
 │   ├── artifact_sync/
 │   ├── function_recovery.py
+│   ├── workflow.py              # controlador schema v2 e gates Python
+│   ├── workflow_stages.py       # etapas e pré-requisitos normativos
 │   ├── header_dependency_analyzer/
 │   │   ├── analyze.py
 │   │   ├── export_inventory.py
@@ -77,6 +79,7 @@ ctrust/
 │   ├── check-ffi-surface.sh   # auditoria opcional de fronteiras/unsafe
 │   ├── ctrust-state.sh        # estado, resume e checkpoints
 │   ├── migration-completeness.sh # bloqueia stubs e exige origem C rastreável
+│   ├── inventory-gate.sh      # valida o inventário YAML por slice
 │   ├── migration-gate.sh
 ├── sync.sh
 └── README.md
@@ -108,7 +111,7 @@ O protocolo operacional é:
 5. Use `function-map` para atualizar mapas legados v1 para v2 preservando o conteúdo. `select-function` atribui IDs únicos e retoma implementação, testes ou comparação conforme o estado salvo.
 6. Registre implementação e evidência NDJSON para a unidade ativa. A evidência deve identificar `slice_id`, `unit_id`, `function_id`, comando, origem do expected result, valores `expected`/`observed` iguais e `result: passed`. Comparação exige categorias `normal`, `boundary` e `error`; sem referência legada, exige também `unresolved_reference`, motivo explícito e expectativas independentes.
 7. Execute `compare ... passed` para verificar a função e atualizar `comparison.yaml`. Este comando não declara o slice verificado.
-8. Execute `.ctrust/sync.sh verify-slice . <slice-id>` para validar artefatos, origem, organização, completude e Cargo, marcar o slice verificado, criar checkpoint e selecionar o próximo slice. Preencha o checkpoint com as decisões e limitações da revisão.
+8. Execute `.ctrust/sync.sh verify-slice . <slice-id>` para executar o gate agregado, marcar o slice como `verified`, criar um checkpoint e reconciliar o próximo estado. O wrapper executa primeiro `migration-gate.sh`; esse gate valida inventário, pré-requisitos, recuperação por função, arquitetura, segurança de API, estruturas, comportamento, organização, completude, comparação, formatação, compilação e testes Cargo. Depois, o controlador Python executa os gates `structures`, `behavior`, `functions`, `comparison` e `sources` e só então promove o manifesto. O ctrust não cria nem edita crates destino durante planejamento ou validação; o agente/usuário deve disponibilizar o workspace Cargo exigido pelo gate. Preencha o checkpoint com as decisões e limitações da revisão.
 
 Os gates usam o slice ativo por padrão. Um segundo argumento seleciona um slice; `--all` exige artefatos de todos os slices para a revisão final:
 
@@ -178,17 +181,31 @@ O exportador preserva arquivos complementares e rejeita a substituição automá
 
 O destino `generic` é recomendado quando o projeto não usa um cliente específico. Os scripts são mantidos em `.ctrust/scripts` nos destinos de cliente para evitar misturar ferramentas de migração com os scripts próprios do projeto.
 
-### Comandos utilitários
+### Comandos públicos
+
+O ponto de entrada recomendado é `sync.sh`; ele despacha os comandos de migração para `scripts/ctrust-state.sh`. O usuário normalmente consulta o estado ou fornece decisões; o `ctrust-lead` coordena o ciclo e executa os comandos necessários. Os comandos abaixo são o contrato público do wrapper:
+
+| Comando | Finalidade |
+|---|---|
+| `init`, `upgrade-state` | Inicializar `.ctrust` schema v2 ou converter estado legado preservando backup. |
+| `status`, `status-slices`, `resume` | Consultar estado compacto, tabela derivada e contexto de recuperação (`--brief` por padrão). |
+| `reconcile`, `reconcile-artifacts`, `validate-artifacts` | Reconciliar estado, atualizar apenas blocos gerenciados dos planos ou validar sem escrever. |
+| `plan-slices`, `inventory`, `recover` | Criar planos individuais, exportar inventário transacional ou executar uma recuperação mecânica elegível. |
+| `contract`, `model`, `organize`, `validate-organization` | Criar templates e gerar/validar o plano de organização após os pré-requisitos. |
+| `function-map`, `select-function` | Validar/enriquecer o mapa v2 e selecionar a próxima unidade funcional. |
+| `record-implementation`, `record-evidence`, `compare` | Persistir implementação, evidência NDJSON e classificação da comparação da unidade ativa. |
+| `verify-slice` | Executar os gates, promover o slice a `verified`, criar checkpoint e reconciliar. |
+| `next`, `failed`, `checkpoint` | Registrar decisão/ação diferente, falha com guarda de tentativas ou checkpoint explícito. |
+
+Comandos de implantação e manutenção permanecem no mesmo wrapper:
 
 ```bash
 ./sync.sh list
 ./sync.sh verify
-./sync.sh reconcile-artifacts /caminho/para/projeto
-./sync.sh validate-artifacts /caminho/para/projeto
-./sync.sh organize /caminho/para/projeto
-./sync.sh validate-organization /caminho/para/projeto
 ./sync.sh clean generic /caminho/para/projeto
 ```
+
+`workflow.py` possui subcomandos internos usados pelo dispatcher (`gate`, `guard-action`, `update-state`, `sync-context`, entre outros); eles não substituem o CLI público e não devem ser tratados como etapas manuais independentes.
 
 ## Teste executável com código C real
 
@@ -212,7 +229,7 @@ do exemplo para pré-requisitos, procedência e limites da paridade demonstrada.
 
 ## Memória persistente e recuperação de contexto
 
-O ctrust possui dois fluxos de entrada. Não use `resume` para iniciar uma migração nova.
+O ctrust possui três fluxos de entrada. Não use `resume` para iniciar uma migração nova.
 
 ### Fluxo A — migração nova
 
@@ -298,21 +315,33 @@ Por padrão o `resume` usa o modo `--brief`: ele imprime apenas o cabeçalho de 
 .ctrust/sync.sh resume . --full   # contexto completo
 ```
 
-Saída do modo `--brief`:
+Saída representativa do modo `--brief` (os campos ativos podem estar vazios antes da seleção de uma função):
 
 ```text
 PHASE=inventory
+ACTIVE_SLICE=none
+ACTIVE_UNIT=none
+ACTIVE_FUNCTIONS=[]
+NEXT_FUNCTION=none
+IMPLEMENTATION_STATUS=pending
+TEST_STATUS=pending
+COMPARISON_STATUS=pending
+ACTIVE_RUST_FILE=
+ACTIVE_MODULE_PATH=
 UNIT=none
 STATUS=initialized
-NEXT_ACTION="Run migration-scoping and define the slice manifest before inventory"
-NEXT_COMMAND=""
+NEXT_ACTION=Run migration-scoping and define the slice manifest before inventory
+NEXT_COMMAND=
 NEXT_OWNER=ctrust-lead
 NEXT_SKILL=migration-scoping
+RECOVERY_CODE=
+RECOVERY_ACTION=
+ELIGIBLE_ACTIONS=[]
 LAST_CHECKPOINT=none
 ATTEMPTS=0/2
-LAST_ERROR=""
+LAST_ERROR=
 LOOP_GUARD=ok
-GUIDANCE=Execute only NEXT_COMMAND, then update state and checkpoint.
+GUIDANCE=Complete NEXT_ACTION using NEXT_SKILL, validate the artifacts, then reconcile.
 ```
 
 O modo `--full` carrega o estado, o manifesto de slices, o contexto atual, o plano ativo, o contrato, o modelo e o último checkpoint; leia os inventários referenciados quando necessário. Use-o somente quando o cabeçalho não for suficiente para decidir a próxima ação.
@@ -403,13 +432,13 @@ Cada slice pode ser dividido em uma função ou grupo coeso. O mapa funcional ma
 ```bash
 .ctrust/sync.sh function-map . <slice-id>
 .ctrust/sync.sh select-function . <slice-id>
-.ctrust/sync.sh record-implementation . <unit-id> <rust-file> <module-path>
-.ctrust/sync.sh record-evidence . <unit-id> <evidence-path>
+.ctrust/sync.sh record-implementation . <unit-id> [<rust-file>|auto] <module-path>
+.ctrust/sync.sh record-evidence . <unit-id> [<evidence-path>|auto]
 .ctrust/sync.sh compare . <unit-id> passed
 .ctrust/sync.sh verify-slice . <slice-id>
 ```
 
-Após cada implementação/teste/comparação, o ctrust atualiza `function-map.yaml`, `migration.yaml` e `status-slices.md`. Funções `verified` não são selecionadas novamente; quando todas as funções do slice estão verificadas, `verify-slice` executa os gates e promove o manifesto a `verified` antes de criar checkpoint e avançar.
+Após cada implementação/teste/comparação, o ctrust atualiza `function-map.yaml`, `migration.yaml` e `status/slices.md`. Funções `verified` não são selecionadas novamente; quando todas as funções do slice estão verificadas, `verify-slice` executa os gates e promove o manifesto a `verified` antes de criar checkpoint e avançar.
 
 O `resume --brief` mostra `ACTIVE_UNIT`, `ACTIVE_FUNCTIONS`, `NEXT_FUNCTION`, `IMPLEMENTATION_STATUS`, `TEST_STATUS` e `COMPARISON_STATUS`, evitando recarregar slices concluídos.
 
@@ -546,9 +575,9 @@ Para editar um arquivo existente, leia-o primeiro e envie o trecho exato:
 
 Se aparecer `filePath is missing`, `oldString is missing` ou `newString is missing`, não repita a chamada sem alteração. Resolva o caminho, releia o arquivo quando necessário e reenvie o payload completo. Se o arquivo não existir, use `write`. No início de uma sessão, execute `.ctrust/sync.sh resume .` a partir da raiz do projeto Rust destino — ou `./sync.sh resume ..` dentro de `.ctrust/`. O modo padrão `--brief` devolve o cabeçalho com `NEXT_COMMAND` e `LOOP_GUARD`; use `--full` só quando precisar do manifesto, do plano, do contrato, do modelo e do último checkpoint. Execute apenas `NEXT_COMMAND` por turno. Ao final, atualize o estado, as evidências e uma única próxima ação com `next`. O instalador preserva arquivos existentes que diferem do toolkit e reporta conflitos; revise esses conflitos ao atualizar uma instalação. Os comandos de progresso atualizam seus artefatos de estado.
 
-### Cargo workspace do destino Rust
+### Workspace Cargo do destino Rust
 
-O agente deve criar ou atualizar um único workspace Cargo na raiz do projeto Rust:
+A organização registra deterministicamente o `crate_root`, `rust_file` e `module_path` esperados para cada slice, mas o controlador não cria nem modifica `Cargo.toml`, crates, código Rust ou testes. O agente deve criar ou atualizar o workspace Cargo na raiz do destino antes do gate final, sem remover membros existentes:
 
 ```text
 parser-rust/                  # target.project_root
@@ -560,20 +589,7 @@ parser-rust/                  # target.project_root
         └── Cargo.toml
 ```
 
-O `Cargo.toml` da raiz deve ser criado um nível acima dos crates e listar todos os crates:
-
-```toml
-[workspace]
-resolver = "2"
-members = [
-    "crates/parser-core",
-    "crates/parser-cli",
-]
-```
-
-O `ctrust-lead` deve criar esse `Cargo.toml` antes do primeiro slice, ou atualizar um workspace existente sem remover seus membros. O usuário não precisa montar o workspace manualmente; apenas informa o projeto Rust destino e os agentes persistem a decisão no plano da unidade.
-
-O `init` é apenas bootstrap técnico. A primeira fase funcional é sempre `migration-scoping`, que cria o manifesto de slices antes do inventário.
+O gate `migration-gate.sh` exige `Cargo.toml` na raiz e executa `cargo fmt --check`, `cargo check --workspace` e `cargo test --workspace`. O plano de organização é uma validação de destino; `record-implementation` rejeita arquivos ou módulos que não correspondam a esse plano. A primeira fase funcional continua sendo `migration-scoping`, que cria o manifesto de slices antes do inventário.
 
 | Fase | Agente principal | Skills a carregar | Resultado esperado |
 |---|---|---|---|
@@ -648,7 +664,9 @@ A confirmação do mapa C→DTO→Domain deve alterar o mesmo `data-structures.y
    ```
 
 7. Um slice só passa ao próximo quando o atual estiver verificado. Se falhar, o agente marca-o como `blocked`, registra risco e próxima ação, e não altera silenciosamente a ordem ou o escopo dos slices.
-7. Ao final de cada slice, o agente atualiza o estado e executa a recuperação necessária para continuar sem depender do histórico da conversa.### Regras de seleção
+8. Ao final de cada slice, o agente atualiza o estado e executa a recuperação necessária para continuar sem depender do histórico da conversa.
+
+### Regras de seleção
 
 - **Não use todos os agentes ao mesmo tempo.** Carregue somente o agente da fase atual e as skills listadas para ela.
 - **`ctrust-lead` é o orquestrador**, não o substituto da análise especializada do C ou da auditoria de segurança.
@@ -729,7 +747,7 @@ O `inventory-c.sh` é um inventário amplo. O `header_dependency_analyzer` e o `
 ./scripts/ctrust-state.sh function-map /caminho/para/projeto-rust <slice-id>
 ./scripts/ctrust-state.sh select-function /caminho/para/projeto-rust <slice-id>
 ./scripts/ctrust-state.sh record-implementation /caminho/para/projeto-rust <unit-id> <rust-file> <module-path>
-./scripts/ctrust-state.sh record-evidence /caminho/para/projeto-rust <unit-id> <evidence-path>
+./scripts/ctrust-state.sh record-evidence /caminho/para/projeto-rust <unit-id> [<evidence-path>|auto]
 ./scripts/ctrust-state.sh compare /caminho/para/projeto-rust <unit-id> <passed|failed>
 ./scripts/ctrust-state.sh next       /caminho/para/projeto-rust "<ação>" "<comando>"
 ./scripts/ctrust-state.sh failed     /caminho/para/projeto-rust "<motivo>"
@@ -764,10 +782,10 @@ Pré-requisitos: Bash, Python 3.10+, PyYAML e utilitários `find`, `grep`, `awk`
 
 ## Migração sem testes legados
 
-Quando o código C não possui testes unitários nem harness executável, não invente uma comparação C/Rust. Registre:
+Quando o código C não possui testes unitários nem harness executável, não invente uma comparação C/Rust. O workflow aceita a classificação `verified_without_legacy_reference`, desde que o escopo seja `behavior_contract`, exista uma razão explícita e cada expectativa venha de uma fonte independente:
 
 ```yaml
-comparison_status: not_applicable
+comparison_status: verified_without_legacy_reference
 verification_scope: behavior_contract
 legacy_reference:
   available: false
@@ -776,8 +794,70 @@ legacy_reference:
   reason: "Legacy project has no executable tests or reference harness"
 ```
 
+As evidências ainda devem cobrir `normal`, `boundary`, `error` e `unresolved_reference`, com `expected_reason` e uma fonte como `source_analysis`, `domain_rule`, `protocol_specification`, `manual_calculation`, `approved_fixture`, `independent_reference_model` ou `expert_review`. `comparison_status: not_applicable` não satisfaz o gate atual.
+
 Crie evidências de caracterização reconstruídas a partir de `behavior.yaml`, `contract.yaml` e `data-structures.yaml`, cobrindo `normal`, `boundary`, `error` e `unresolved_reference`. Cada expected result deve indicar uma fonte independente (`source_analysis`, `domain_rule`, `protocol_specification`, `manual_calculation`, `approved_fixture`, `independent_reference_model` ou `expert_review`).
 
 O estado permitido nesse fluxo é `verified_without_legacy_reference`, nunca `parity_verified`. Ele exige mapa, estruturas, comportamento e contrato confirmados, testes aplicáveis aprovados, revisão independente e limitações registradas.
 
 O ctrust fornece a estrutura inicial de agentes, skills e scripts para conversão de C para Rust. A conversão direta e idiomática é o caminho padrão; as ferramentas de fronteira e auditoria FFI são auxiliares opcionais para migrações graduais ou dependências C que permaneçam externas. Os scripts são genéricos e devem ser adaptados às convenções, sistema de build, toolchain e cobertura de testes de cada projeto legado.
+
+### Harmonização de funções entre slices
+
+A organização do crate distingue o arquivo físico de uma slice da identidade de cada função C. Quando uma dependência de slice alcança uma função já presente em outro slice do mesmo crate, o `function_id` da definição C é a chave compartilhada; o nome Rust não é recalculado a partir da descrição de cada slice.
+
+Depois de `organize`, o ctrust persiste `.ctrust/plans/units/<unit>-symbol-map.yaml` com `canonical_rust_name`, `owner_slice`, `rust_file`, `module_path`, `rust_path` e `consumers`. O primeiro owner ordenado define o destino canônico; slices dependentes devem reutilizar esse `rust_path` por reexport ou chamada qualificada. Se o mesmo `function_id` aparecer com `rust_name` explícitos diferentes, a organização falha com `canonical_name_conflict`. O `record-implementation` também valida o destino canônico antes de registrar a função.
+
+Exemplo conceitual:
+
+```yaml
+- function_id: c:src/common.c:42:normalize_value
+  canonical_rust_name: normalize_value
+  owner_slice: kin-001-base
+  rust_file: src/base.rs
+  module_path: crate::base
+  rust_path: crate::base::normalize_value
+  consumers: [kin-002-flight]
+```
+
+Isso impede que `normalize_value` seja implementada como `crate::flight::normalize_value` no slice consumidor quando a implementação pertence ao slice base.
+
+### Diagnóstico e fonte única de estado
+
+O único estado operacional do ctrust é `.ctrust/migration.yaml`. Um `migration.yaml` na raiz do projeto não é usado pelo workflow e pode confundir o agente; mantenha-o removido ou trate-o como legado fora do fluxo.
+
+Use o diagnóstico não destrutivo antes de retomar uma sessão:
+
+```bash
+.ctrust/sync.sh doctor .
+```
+
+O `doctor` verifica schema v2, shadow state na raiz, manifesto ativo, inventário, destinos Rust registrados, `organization.yaml`, arquivos `rust_file` e referências de evidência `.ndjson`. Ele não altera artefatos. A forma equivalente dentro de `.ctrust` é:
+
+```bash
+./sync.sh doctor ..
+```
+
+A partir da raiz do projeto, todos os comandos `.ctrust/sync.sh <comando> . ...` usam `.` como raiz do projeto; o argumento não é um parâmetro da migração, é o diretório que contém `.ctrust`.
+
+### Behavior por raízes da slice
+
+O `header_dependency_analyzer` mantém o grafo transitivo completo em `dependencies.yaml` e `function-map.yaml`, mas `behavior.yaml` é deliberadamente limitado às funções raiz declaradas no manifesto da slice. Funções já pertencentes a outro slice aparecem em `references`; infraestrutura aparece em `adapters`. Isso reduz o contexto e impede a reextração de comportamento já confirmado.
+
+O schema de behavior usa:
+
+```yaml
+functions: []
+references: []
+adapters: []
+```
+
+`behaviors: {nome: ...}` não é um formato válido para os gates atuais.
+
+Para reduzir contexto durante behavior extraction, o exporter também grava artifacts individuais em `inventory/slices/<slice>/behavior/functions/`. Use:
+
+```bash
+.ctrust/sync.sh behavior-function . <slice-id> <c-function-name>
+```
+
+O comando carrega somente a função ativa; `behavior.yaml` permanece como índice compacto e o grafo transitivo continua em `dependencies.yaml`/`callers.yaml`.

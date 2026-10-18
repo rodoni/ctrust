@@ -58,3 +58,25 @@ completion:
 ## Saída para a próxima fase
 
 Após confirmar `behavior.yaml`, atualize a próxima ação e encaminhe o mesmo slice para `contract-extraction`. O contrato deve derivar deste artefato, mas não o substituir. Não crie a implementação Rust nesta fase.
+
+## Escopo por raízes e ownership
+
+`behavior.yaml` deve detalhar somente as funções raiz declaradas em `source.functions` para a slice. O grafo transitivo completo permanece em `dependencies.yaml`, `callers.yaml` e `function-map.yaml`, mas funções já owned por slices verificadas não devem ser reextraídas.
+
+Use o `symbol-map.yaml` para classificar dependências:
+
+- `references`: funções implementadas por outro `owner_slice`, com `rust_path` canônico;
+- `adapters`: infraestrutura externa classificada como `adapter`;
+- `functions`: somente as raízes próprias da slice.
+
+O schema de `behavior.yaml` exige `functions` como lista. Não use `behaviors` como mapa de nomes. `test_cases` funcionais podem ser detalhados por função, mas não devem transformar dependências transitivas em novas funções da slice.
+
+## Extração incremental
+
+Leia uma função por vez usando o artifact detalhado:
+
+```bash
+.ctrust/sync.sh behavior-function . <slice-id> <c-function-name>
+```
+
+O comando carrega `.ctrust/inventory/slices/<slice>/behavior/functions/<function>.yaml`, atualiza a unidade ativa e não recarrega o comportamento completo da slice. Confirme o artifact individual antes de avançar para a próxima função.

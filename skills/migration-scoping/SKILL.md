@@ -135,3 +135,21 @@ O `ctrust-lead` deve criar o manifesto e os planos dos slices como parte desta f
 - uma próxima ação única registrada em `current-context.md`.
 
 Não inicie a extração de contratos enquanto o escopo misturar lógica de negócio com infraestrutura não classificada ou enquanto os slices não estiverem ordenados.
+
+## Identidade compartilhada entre slices
+
+Quando dois slices do mesmo crate alcançam a mesma definição C, mantenha o mesmo `function_id` e declare o mesmo `source.functions[].rust_name`. O primeiro slice elegível torna-se o owner; o slice dependente referencia o símbolo do owner e não cria outro nome Rust.
+
+A etapa de organização gera `.ctrust/plans/units/<unit>-symbol-map.yaml`, indexado por `function_id`, com `canonical_rust_name`, `owner_slice`, `rust_file`, `module_path`, `rust_path` e `consumers`. Nomes explícitos divergentes para o mesmo `function_id` bloqueiam a organização. O mapa é a fonte de verdade para chamadas entre slices e deve ser revisado quando a fronteira ou o crate forem alterados.
+
+## Nome semântico da slice
+
+Cada slice deve declarar `semantic_name` curto, estável e em `snake_case`, adequado para um arquivo e módulo Rust. Use o objetivo (`objective`, ou o alias legado `goal`) como descrição da regra de negócio, não como nome físico do módulo.
+
+```yaml
+- id: kinematics-004-flight-phases
+  semantic_name: flight_phases
+  objective: Implement flight phase kinematic calculations.
+```
+
+O ctrust aceita `goal` como alias legado de `objective` e `conclusion` como alias legado de `completion_criteria`, mas novos manifestos devem usar os nomes canônicos. Quando `semantic_name` estiver vazio, o organizador deriva um nome curto da descrição do ID; ele não deve transformar um parágrafo de objetivo em nome de arquivo.

@@ -18,7 +18,13 @@ Available targets (Deploy):
   claude      [dest] Deploy agents/skills to .claude and scripts/tools to .ctrust
   all         [dest] Deploy to all supported targets
 
+Update commands:
+  <target> update [dest]  Update managed ctrust components for a target
+  update <target> [dest]  Equivalent explicit update form
+
 Utility commands:
+  doctor [dest]            Diagnose state, target, maps, organization and evidence without writing
+  behavior-function [dest] <slice> <function> Review one behavior artifact
   init [dest]             Initialize .ctrust migration state in a project
   upgrade-state [dest]    Upgrade legacy migration.yaml to schema version 2
   reconcile-artifacts [dest] Reconcile .ctrust artifacts deterministically
@@ -29,8 +35,8 @@ Utility commands:
   resume [dest] [--brief|--full] Print recovery context (default --brief)
   function-map [dest]     Validate/enrich function-level map
   select-function [dest]  Select the next function unit
-  record-implementation [dest] <unit> <rust_file> <module_path>
-  record-evidence [dest] <unit> <evidence_path>
+  record-implementation [dest] <unit> [rust_file|auto] <module_path>
+  record-evidence [dest] <unit> [evidence_path|auto] Record test evidence (auto resolves the active function evidence)
   verify-slice [dest] [slice] Run migration gates, checkpoint and advance
   compare [dest] <unit> <passed|failed>
   checkpoint [dest] [title] Create a numbered recovery checkpoint
@@ -48,6 +54,8 @@ Utility commands:
 Examples:
   ./sync.sh generic /path/to/project
   ./sync.sh kilocode /path/to/project
+  ./sync.sh kilocode update /path/to/project
+  ./sync.sh update kilocode /path/to/project
   ./sync.sh all /path/to/project
   ./sync.sh list
   ./sync.sh verify
@@ -72,6 +80,10 @@ install_file() {
     if [ -f "$destination" ]; then
         if cmp -s "$source" "$destination"; then
             echo "  unchanged $destination"
+        elif [ "${UPDATE_MODE:-0}" -eq 1 ]; then
+            cp "$source" "$destination"
+            chmod --reference="$source" "$destination" 2>/dev/null || true
+            echo "  updated   $destination"
         else
             echo "  conflict  $destination (preserved existing file)" >&2
         fi
@@ -200,6 +212,12 @@ deploy_target() {
             return 1
             ;;
     esac
+}
+
+update_target() {
+    local target="$1"
+    local dest="${2:-.}"
+    UPDATE_MODE=1 deploy_target "$target" "$dest"
 }
 
 remove_if_same() {
@@ -368,7 +386,24 @@ verify() {
 
 case "$CMD" in
     generic|antigravity|opencode|kilocode|cursor|claude|all)
-        deploy_target "$CMD" "${2:-.}"
+        if [ "${2:-}" = "update" ]; then
+            update_target "$CMD" "${3:-.}"
+        else
+            deploy_target "$CMD" "${2:-.}"
+        fi
+        ;;
+    update)
+        target="${2:-}"
+        case "$target" in
+            generic|antigravity|opencode|kilocode|cursor|claude|all)
+                update_target "$target" "${3:-.}"
+                ;;
+            *)
+                echo "Unknown update target: $target" >&2
+                usage
+                exit 1
+                ;;
+        esac
         ;;
     clean)
         clean_target "${2:-generic}" "${3:-.}"
@@ -376,7 +411,7 @@ case "$CMD" in
     list)
         list_components
         ;;
-    init|inventory|recover|upgrade-state|status|status-slices|reconcile|reconcile-artifacts|validate-artifacts|plan-slices|organize|validate-organization|verify-slice|function-map|select-function|record-implementation|record-evidence|compare|resume|checkpoint|contract|model|next|failed)
+    init|doctor|behavior-function|inventory|recover|upgrade-state|status|status-slices|reconcile|reconcile-artifacts|validate-artifacts|plan-slices|organize|validate-organization|verify-slice|function-map|select-function|record-implementation|record-evidence|compare|resume|checkpoint|contract|model|next|failed)
         "$REPO_ROOT/scripts/ctrust-state.sh" "$CMD" "${2:-.}" "${3:-checkpoint}" "${4:-}" "${5:-}"
         ;;
     verify)

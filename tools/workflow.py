@@ -15,6 +15,7 @@ import yaml
 from artifact_sync.transaction import WorkspaceLock, atomic_write, TransactionError
 from function_recovery import UnitState, ALLOWED_TRANSITIONS
 from workflow_stages import STAGES, ACTION_REQUIREMENTS, FUNCTION_ACTIONS
+from manifest_schema import ManifestSchemaError, normalize_slice
 
 
 class WorkflowError(ValueError):
@@ -77,6 +78,19 @@ def save(root, path, data):
 STRUCTURE_FIELDS = ("structures_identified", "fields_mapped", "layout_mapped", "pointer_semantics_mapped", "shared_memory_classified", "rust_strategy_defined", "evidence_recorded")
 BEHAVIOR_FIELDS = ("source_logic_read", "branches_mapped", "calls_mapped", "errors_mapped", "side_effects_mapped", "test_cases_defined")
 STATES = {s.value for s in UnitState}
+MIGRATION_ROLES = {"port", "adapter", "reference", "simulate", "exclude"}
+
+
+def is_non_port_role(fn):
+    return fn.get("migration_role", "port") in {"adapter", "reference", "simulate", "exclude"}
+
+
+def require_non_port_decision(fn):
+    role = fn.get("migration_role", "port")
+    if role not in MIGRATION_ROLES:
+        raise WorkflowError(f"Invalid migration_role for {fn.get('c_name')}: {role}")
+    if role != "port" and not fn.get("migration_decision"):
+        raise WorkflowError(f"Missing migration_decision for non-port function: {fn.get('c_name')}")
 
 
 def confirmation_errors(path, fields=()):
@@ -84,12 +98,17 @@ def confirmation_errors(path, fields=()):
         return [f"{path}: missing artifact"]
     data = load(path)
     errors = []
-    if data.get("status") != "confirmed":
-        errors.append(f"{path}: status expected 'confirmed', observed {data.get('status')!r}; review evidence before confirming")
     completion = data.get("completion", {})
     if not isinstance(completion, dict):
         errors.append(f"{path}: completion expected mapping, observed {completion!r}")
         completion = {}
+    root_status = data.get("status")
+    nested_status = completion.get("status")
+    if root_status is not None and nested_status is not None and root_status != nested_status:
+        errors.append(f"{path}: conflicting confirmation status, root status={root_status!r}, completion.status={nested_status!r}")
+    effective_status = root_status if root_status is not None else nested_status
+    if effective_status != "confirmed":
+        errors.append(f"{path}: status expected 'confirmed', observed {effective_status!r}; review evidence before confirming")
     for field in fields:
         if completion.get(field) is not True:
             observed = repr(completion[field]) if field in completion else "missing"
@@ -147,6 +166,92 @@ def require_inventory(root, sid):
         raise WorkflowError("Inventory incomplete or invalid; run c-code-inventory for " + sid + ": " + "; ".join(errors))
 
 
+def doctor(project):
+    """Diagnose persistent ctrust state without writing any artifact."""
+    project = project.resolve()
+    root = project / ".ctrust"
+    errors = []
+    warnings = []
+    state_path = root / "migration.yaml"
+    if not state_path.is_file():
+        errors.append(f"Missing canonical state: {state_path}")
+        return errors, warnings
+    try:
+        state = load(state_path)
+    except WorkflowError as exc:
+        return [str(exc)], warnings
+    if state.get("version") != 2:
+        errors.append(f"{state_path}: version expected 2, observed {state.get('version')!r}")
+    shadow = project / "migration.yaml"
+    if shadow.is_file():
+        warnings.append(f"Shadow migration.yaml exists at project root; ctrust uses {state_path}")
+        try:
+            root_state = load(shadow)
+            for section in ("source", "target", "output"):
+                if root_state.get(section) != state.get(section):
+                    errors.append(f"Root migration.yaml conflicts with .ctrust/migration.yaml in section {section!r}")
+        except WorkflowError as exc:
+            errors.append(str(exc))
+    try:
+        entries = manifests(root)
+    except WorkflowError as exc:
+        errors.append(str(exc))
+        return errors, warnings
+    current = state.get("current_unit")
+    if current not in entries and current not in (None, "", "none"):
+        errors.append(f"current_unit is not declared in the slice manifest: {current}")
+    sid = current if current in entries else select_slice(entries, state)
+    if not sid:
+        warnings.append("No active or eligible slice")
+        return errors, warnings
+    inventory = root / f"inventory/slices/{sid}"
+    errors.extend(inventory_errors(root, sid))
+    map_path = inventory / "function-map.yaml"
+    if map_path.is_file():
+        try:
+            _, function_map = read_map(root, sid)
+            for fn in function_map["functions"]:
+                require_non_port_decision(fn)
+                if is_non_port_role(fn):
+                    continue
+                state_name = fn.get("state")
+                if state_name in {"implemented", "tested", "verified"}:
+                    rust_file = fn.get("rust_file", "")
+                    if not rust_file or not (project / rust_file).is_file():
+                        errors.append(f"{sid}/{fn.get('c_name')}: implemented Rust file missing: {rust_file}")
+                if state_name in {"tested", "verified"}:
+                    refs = fn.get("evidence_refs", [])
+                    if not refs:
+                        errors.append(f"{sid}/{fn.get('c_name')}: tested function has no evidence_refs")
+                    for ref in refs:
+                        if not str(ref).endswith(".ndjson"):
+                            errors.append(f"{sid}/{fn.get('c_name')}: evidence_ref is not NDJSON: {ref}")
+                        elif not (project / ref).is_file():
+                            errors.append(f"{sid}/{fn.get('c_name')}: evidence file missing: {ref}")
+        except WorkflowError as exc:
+            errors.append(str(exc))
+    organization = root / "plans/units/organization.yaml"
+    if organization.is_file():
+        try:
+            from organization.cli import validate_persisted
+            plan = validate_persisted(project, sid)
+            mappings = {item.get("function_id"): item for item in plan.symbol_map}
+            for fn in function_map.get("functions", []) if map_path.is_file() else []:
+                if is_non_port_role(fn):
+                    continue
+                if fn.get("state") in {"implemented", "tested", "verified"} and fn.get("function_id") in mappings:
+                    mapping = mappings[fn["function_id"]]
+                    if mapping.get("owner_slice") != sid:
+                        continue
+                    expected_file = (Path(plan.crate_root) / mapping["rust_file"]).resolve()
+                    observed_file = (project / fn.get("rust_file", "")).resolve()
+                    if expected_file != observed_file or fn.get("module_path") != mapping.get("module_path"):
+                        errors.append(f"{sid}/{fn.get('c_name')}: function-map destination is stale; expected {expected_file}, {mapping.get('module_path')}, observed {observed_file}, {fn.get('module_path')}")
+        except (WorkflowError, OSError) as exc:
+            errors.append(f"organization: {exc}")
+    return errors, warnings
+
+
 def require_mapping(path):
     require_confirmed(path)
     counts = load(path).get("counts", {})
@@ -159,7 +264,14 @@ def manifests(root):
     entries = {}
     for path in sorted((root / "plans/units").glob("*-slices.yaml")):
         data = load(path)
-        for item in data.get("slices", []):
+        for raw_item in data.get("slices", []):
+            try:
+                item = normalize_slice(raw_item)
+            except ManifestSchemaError as exc:
+                raise WorkflowError(str(exc)) from exc
+            raw_item.clear()
+            raw_item.update(item)
+            item = raw_item
             sid = item.get("id")
             if not isinstance(sid, str) or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", sid):
                 raise WorkflowError(f"Invalid slice ID in {path}: {sid!r}")
@@ -276,8 +388,51 @@ def evidence_path(project, value):
     if not path.is_relative_to(project):
         raise WorkflowError(f"Evidence/destination escapes project: {value}")
     if not path.is_file():
-        raise WorkflowError(f"Evidence/destination not found: {path}")
+        if path.exists():
+            raise WorkflowError(f"Evidence path is not a regular file: {path}")
+        raise WorkflowError(f"Evidence file not found: {path}")
     return path
+
+
+def rust_destination_path(project, value):
+    path = Path(str(value or "").strip())
+    if not str(value or "").strip():
+        raise WorkflowError("Rust implementation path is required; use 'auto' or pass <rust-file> <module-path>")
+    path = (project / path).resolve() if not path.is_absolute() else path.resolve()
+    if not path.is_relative_to(project):
+        raise WorkflowError(f"Rust implementation path escapes project: {value}")
+    if not path.is_file():
+        raise WorkflowError(f"Rust implementation file not found: {path}; record-implementation expects a Rust file path, not a description or evidence path")
+    return path
+
+
+def evidence_candidates(root, sid, fn):
+    names = [fn.get("c_name", ""), fn.get("rust_name", "")]
+    candidates = [root / "evidence" / sid / f"{name}.ndjson" for name in names if name]
+    unit = fn.get("unit_id", "")
+    if unit:
+        candidates.append(root / "evidence" / "tests" / f"{unit}.ndjson")
+    return list(dict.fromkeys(candidates))
+
+
+def resolve_evidence_path(project, root, sid, fn, value=""):
+    requested = str(value or "").strip()
+    names = {fn.get("c_name", ""), fn.get("rust_name", "")}
+    automatic = not requested or requested in {"auto", "--auto"} or requested in names
+    if automatic:
+        candidates = evidence_candidates(root, sid, fn)
+        existing = [path for path in candidates if path.is_file()]
+        if len(existing) == 1:
+            return existing[0]
+        if len(existing) > 1:
+            paths = ", ".join(str(path.relative_to(project)) for path in existing)
+            raise WorkflowError(f"Multiple evidence files found for {fn.get('c_name')}: {paths}; pass the exact NDJSON path")
+        expected = str(candidates[0].relative_to(project)) if candidates else f".ctrust/evidence/{sid}/{fn.get('c_name', 'FUNCTION')}.ndjson"
+        raise WorkflowError(f"Evidence for {fn.get('c_name')} not found. Create an NDJSON file or pass its path; expected location: {expected}. Usage: record-evidence <unit-id> <evidence-path>")
+    try:
+        return evidence_path(project, requested)
+    except WorkflowError as exc:
+        raise WorkflowError(f"{exc}. Usage: record-evidence <unit-id> <evidence-path>; use 'auto' to resolve the active function evidence") from exc
 
 
 def evidence_records(project, value, sid, unit, function_id):
@@ -292,6 +447,11 @@ def evidence_records(project, value, sid, unit, function_id):
 
 
 def validate_function(project, sid, fn):
+    require_non_port_decision(fn)
+    if is_non_port_role(fn):
+        if fn.get("state") != "verified":
+            raise WorkflowError(f"Non-port function is not architecturally verified: {fn['c_name']}")
+        return
     if fn["state"] != "verified":
         raise WorkflowError(f"Function not verified: {fn['c_name']}")
     if fn.get("implementation_status") != "implemented" or fn.get("test_status") != "passed":
@@ -578,6 +738,30 @@ def operate(project, command, args):
             return
         if state.get("version") != 2:
             raise WorkflowError("Migration state requires schema v2; run upgrade-state first")
+        if command == "doctor":
+            errors, warnings = doctor(project)
+            for warning in warnings:
+                print(f"DOCTOR WARNING: {warning}")
+            for error in errors:
+                print(f"DOCTOR ERROR: {error}")
+            if errors:
+                raise WorkflowError(f"Doctor found {len(errors)} error(s)")
+            print("Doctor passed")
+            return
+        if command == "behavior-function":
+            sid = args[0] if args and args[0] not in {"", "checkpoint"} else state.get("current_unit")
+            name = args[1] if len(args) > 1 else ""
+            if not sid or not name:
+                raise WorkflowError("Usage: behavior-function <slice-id> <c-function-name>")
+            require_inventory(root, sid)
+            safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("_") or "function"
+            artifact = root / f"inventory/slices/{sid}/behavior/functions/{safe_name}.yaml"
+            if not artifact.is_file():
+                raise WorkflowError(f"Behavior artifact not found for {name}: {artifact}; run inventory with the scoped exporter first")
+            state.update(current_unit=sid, active_unit=f"{sid}-behavior-{safe_name}", active_functions=[name], next_function=name, phase="behavior_extraction", next_skill="c-behavior-extraction", next_action=f"Review and confirm behavior artifact for {name}", next_command="")
+            save(root, root / "migration.yaml", state)
+            print(artifact.read_text(encoding="utf-8"))
+            return
         if command == "guard-action":
             return require_action(root, state, args[0], args[1])
         if command in {"inventory", "contract", "model", "organize"}:
@@ -721,23 +905,34 @@ def operate(project, command, args):
         else:
             fn = active_function(root, state, data, args[0])
             if command == "record-implementation":
-                destination = evidence_path(project, args[1])
+                if len(args) != 3:
+                    raise WorkflowError("Usage: record-implementation <unit-id> [<rust-file>|auto] <module-path>")
                 from organization.cli import validate_persisted
                 plan = validate_persisted(project, sid)
-                planned = plan.slices[0]
-                expected_file = (Path(plan.crate_root) / planned.implementation_file).resolve()
-                if destination != expected_file or args[2] != planned.module_path:
-                    raise WorkflowError(f"Implementation must follow organization plan: {expected_file}, {planned.module_path}")
+                mapping = next((item for item in plan.symbol_map if item.get("function_id") == fn["function_id"]), None)
+                if mapping is None:
+                    raise WorkflowError(f"No canonical symbol mapping for {fn['function_id']}; regenerate organization")
+                expected_file = (Path(plan.crate_root) / mapping["rust_file"]).resolve()
+                expected_module = mapping["module_path"]
+                requested_file = args[1]
+                destination = expected_file if requested_file in {"", "auto", "--auto"} else rust_destination_path(project, requested_file)
+                if destination != expected_file or args[2] != expected_module:
+                    raise WorkflowError(f"Implementation must follow canonical symbol plan: {expected_file}, {expected_module}")
                 set_transition(fn, "implemented")
-                fn.update(rust_file=str(destination.relative_to(project)), module_path=args[2], implementation_status="implemented")
-                state.update(implementation_status="implemented", active_rust_file=fn["rust_file"], active_module_path=args[2], phase="function_testing", next_action=f"Run tests and record evidence for {args[0]}", next_skill="migration-verification", next_command="")
+                fn.update(rust_name=mapping["canonical_rust_name"], rust_file=str(destination.relative_to(project)), module_path=expected_module, rust_path=mapping["rust_path"], implementation_status="implemented")
+                state.update(implementation_status="implemented", active_rust_file=fn["rust_file"], active_module_path=expected_module, phase="function_testing", next_action=f"Run tests and record evidence for {args[0]}", next_skill="migration-verification", next_command="")
             elif command == "record-evidence":
-                evidence_records(project, args[1], sid, args[0], fn["function_id"])
+                if fn.get("implementation_status") == "implemented":
+                    evidence_path(project, fn.get("rust_file", ""))
+                evidence = resolve_evidence_path(project, root, sid, fn, args[1] if len(args) > 1 else "")
+                evidence_records(project, str(evidence), sid, args[0], fn["function_id"])
                 set_transition(fn, "tested")
-                fn.setdefault("evidence_refs", []).append(str(evidence_path(project, args[1]).relative_to(project)))
+                fn.setdefault("evidence_refs", []).append(str(evidence.relative_to(project)))
                 fn["test_status"] = "passed"
-                state.update(test_status="passed", active_evidence=args[1], phase="function_comparison", next_action=f"Compare and classify evidence for {args[0]}", next_skill="migration-verification", next_command="")
+                state.update(test_status="passed", active_evidence=str(evidence.relative_to(project)), phase="function_comparison", next_action=f"Compare and classify evidence for {args[0]}", next_skill="migration-verification", next_command="")
             elif command == "compare":
+                if len(args) != 2:
+                    raise WorkflowError("Usage: compare <unit-id> <passed|failed>; the active function is selected by select-function")
                 if args[1] not in {"passed", "failed"}:
                     raise WorkflowError("Comparison result must be passed or failed")
                 if args[1] == "failed":
@@ -811,8 +1006,11 @@ def gate(project, kind, scope=""):
         elif kind in {"functions", "comparison", "sources"}:
             _, data = read_map(root, sid)
             for fn in data["functions"]:
+                require_non_port_decision(fn)
                 if kind != "sources":
                     validate_function(project, sid, fn)
+                elif is_non_port_role(fn):
+                    continue
                 else:
                     source = evidence_path(project, fn.get("rust_file", ""))
                     lines = source.read_text().splitlines()
@@ -856,6 +1054,9 @@ def main():
             for sid in scoped_slices(root, values[0] if values else ""):
                 _, data = read_map(root, sid)
                 for fn in data["functions"]:
+                    require_non_port_decision(fn)
+                    if is_non_port_role(fn):
+                        continue
                     files.add(str(evidence_path(project, fn.get("rust_file", ""))))
             print("\n".join(sorted(files)))
         else:

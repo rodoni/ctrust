@@ -28,6 +28,48 @@ def differences(actual, expected, prefix=''):
         yield f'{prefix}: expected {expected!r}, observed {actual!r}'
 
 
+def _function_inputs(root, item):
+    sid = item['id']
+    map_path = root / f'inventory/slices/{sid}/function-map.yaml'
+    if map_path.exists():
+        data = load(map_path)
+        return tuple(
+            FunctionInput(
+                fn['c_name'],
+                fn.get('rust_name', ''),
+                fn.get('function_id', ''),
+                fn.get('definition_file', ''),
+                fn.get('definition_line'),
+            )
+            for fn in data.get('functions', [])
+        )
+    return tuple(
+        FunctionInput(
+            fn['c_name'],
+            fn.get('rust_name', ''),
+            fn.get('function_id', ''),
+            fn.get('definition_file', fn.get('declaration_file', '')),
+            fn.get('definition_line', fn.get('declaration_line')),
+        )
+        for fn in item.get('source', {}).get('functions', [])
+    )
+
+
+def _behavior_test_cases(behavior_data):
+    cases = behavior_data.get('test_cases') or behavior_data.get('behavior_cases') or []
+    if cases:
+        return cases
+    aggregated = []
+    for function in behavior_data.get('functions', []):
+        function_name = function.get('c_name', 'function') if isinstance(function, dict) else 'function'
+        for index, case in enumerate(function.get('test_cases', []) if isinstance(function, dict) else [], 1):
+            if isinstance(case, str):
+                aggregated.append(case)
+            elif isinstance(case, dict):
+                aggregated.append(case.get('id') or f'{function_name}-case-{index}')
+    return aggregated
+
+
 def build_plan(project, sid=''):
     root = project / '.ctrust'
     state = load(root / 'migration.yaml')
@@ -46,7 +88,10 @@ def build_plan(project, sid=''):
     kind = target.get('output_kind') or state.get('output', {}).get('kind', 'library')
     if kind not in {'library', 'binary'}:
         raise WorkflowError(f'Invalid output kind: {kind}')
-    # A plan covers only slices in this manifest assigned to this crate.
+    unit = manifest_data.get('unit', manifest.stem)
+    persisted_path = root / f'plans/units/{unit}-symbol-map.yaml'
+    persisted_mapping = load(persisted_path) if persisted_path.exists() else None
+    # Build one plan from every slice in this crate so shared C symbols receive one identity.
     slices = []
     for item in manifest_data['slices']:
         item_target = item.get('target', {})
@@ -57,11 +102,10 @@ def build_plan(project, sid=''):
             continue
         behavior = root / f"inventory/slices/{item['id']}/behavior.yaml"
         behavior_data = load(behavior) if behavior.exists() else {}
-        cases = item.get('characterization_tests') or behavior_data.get('test_cases') or []
+        cases = item.get('characterization_tests') or _behavior_test_cases(behavior_data)
         cases = tuple(case if isinstance(case, str) else case.get('id', '') for case in cases)
-        functions = tuple(FunctionInput(fn['c_name'], fn.get('rust_name', '')) for fn in item.get('source', {}).get('functions', []))
-        slices.append(SliceInput(item['id'], objective=item.get('objective', ''), functions=functions, test_cases=cases, name_override=item.get('semantic_name')))
-    plan = CtrustOrganizer().plan(OrganizationInput(kind, str(crate_root), manifest_data.get('unit', manifest.stem), tuple(slices)))
+        slices.append(SliceInput(item['id'], objective=item.get('objective') or item.get('goal', ''), functions=_function_inputs(root, item), test_cases=cases, name_override=item.get('semantic_name')))
+    plan = CtrustOrganizer().plan(OrganizationInput(kind, str(crate_root), unit, tuple(slices), persisted_mapping=persisted_mapping))
     return replace(plan, slices=tuple(item for item in plan.slices if item.slice_id == sid))
 
 
@@ -91,8 +135,10 @@ def write_plan(project, sid=''):
     errors = CtrustOrganizer().validate(plan)
     if errors:
         raise WorkflowError('; '.join(f'{e.owner}: {e.rule}' for e in errors))
-    save(root, root / 'plans/units/organization.yaml', plan_to_dict(plan))
-    save(root, root / f'plans/units/{sid}-organization.yaml', plan_to_dict(plan))
+    serialized = plan_to_dict(plan)
+    save(root, root / 'plans/units/organization.yaml', serialized)
+    save(root, root / f'plans/units/{sid}-organization.yaml', serialized)
+    save(root, root / f'plans/units/{plan.unit}-symbol-map.yaml', {'version': 1, 'unit': plan.unit, 'crate_root': plan.crate_root, 'symbols': serialized['symbols']})
     return plan
 
 

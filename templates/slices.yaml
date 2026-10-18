@@ -6,6 +6,7 @@ slices:
   - id: UNIT_NAME-001
     order: 1
     status: planned
+    semantic_name: ""
     objective: "Describe one business behavior"
     source:
       headers: []

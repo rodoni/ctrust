@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -12,7 +13,7 @@ import networkx as nx
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from inventory_transaction import publish_inventory
 from artifact_sync.transaction import TransactionError
-from analyze import analyze, parse_file_cached
+from analyze import analyze, parse_file
 
 
 def scalar(value):
@@ -74,27 +75,13 @@ def write_yaml(path, value):
 
 
 def merge_analyses(project, headers, compile_commands, cache_dir=None, root_functions=None):
-    project = Path(project).expanduser().resolve()
-    headers = list(dict.fromkeys(Path(header).expanduser().resolve() for header in headers))
-    selections = {}
-    if root_functions is not None:
-        requested = list(dict.fromkeys(root_functions))
-        available = set()
-        for header in headers:
-            if not header.is_file() or not header.is_relative_to(project):
-                raise ValueError('Header must exist inside the project directory')
-            _, declarations, _ = parse_file_cached(header, cache_dir)
-            available.update(declarations)
-            selections[header] = [name for name in requested if name in declarations]
-        missing = [name for name in requested if name not in available]
-        if missing:
-            raise ValueError('Requested functions are not declared in the supplied headers: ' + ', '.join(missing))
     graph = nx.DiGraph()
     reports = []
     for header in headers:
         selected_functions = root_functions
         if root_functions is not None:
-            selected_functions = selections[header]
+            _, declarations = parse_file(header)
+            selected_functions = [name for name in root_functions if name in declarations]
             if not selected_functions:
                 continue
         current_graph, report = analyze(project, header, compile_commands, cache_dir, selected_functions)
@@ -104,20 +91,17 @@ def merge_analyses(project, headers, compile_commands, cache_dir=None, root_func
     if root_functions is not None and not reports:
         raise ValueError("None of the requested functions is declared in the supplied headers")
 
-    def unique(field):
-        return list({json.dumps(entry, sort_keys=True): entry for item in reports for entry in item.get(field, [])}.values())
-
     report = {
         "analyzer_version": reports[0].get("analyzer_version", "unknown") if reports else "unknown",
         "project": str(project.resolve()),
         "headers": [item["header"] for item in reports],
-        "roots": unique("roots"),
-        "unresolved_calls": unique("unresolved_calls"),
-        "ambiguous_calls": unique("ambiguous_calls"),
-        "indirect_calls": unique("indirect_calls"),
-        "structures": unique("structures"),
-        "cycles": unique("cycles"),
-        "definitions_indexed": max((item["definitions_indexed"] for item in reports), default=0),
+        "roots": [root for item in reports for root in item["roots"]],
+        "unresolved_calls": [entry for item in reports for entry in item["unresolved_calls"]],
+        "ambiguous_calls": [entry for item in reports for entry in item["ambiguous_calls"]],
+        "indirect_calls": [entry for item in reports for entry in item["indirect_calls"]],
+        "structures": [entry for item in reports for entry in item.get("structures", [])],
+        "cycles": [entry for item in reports for entry in item.get("cycles", [])],
+        "definitions_indexed": sum(item["definitions_indexed"] for item in reports),
         "files_indexed": max((item["files_indexed"] for item in reports), default=0),
     }
     if reports and "compile_commands" in reports[0]:
@@ -136,22 +120,31 @@ def compact_location(value):
 
 
 def compact_behavior_function(graph, node, attrs):
+    def compact_items(items, limit=24):
+        values = list(items)
+        result = values[:limit]
+        if len(values) > limit:
+            result.append({"truncated": len(values) - limit})
+        return result
+
     calls = []
-    for child in graph.successors(node):
+    for child in list(graph.successors(node))[:24]:
         child_attrs = graph.nodes[child]
         calls.append({
             "name": child_attrs.get("label", child),
+            "function_id": child,
             "definition": compact_location({"file": child_attrs.get("file", ""), "line": child_attrs.get("line", 0)}) if child_attrs.get("file") else child_attrs.get("status", "unknown"),
         })
     return {
         "c_name": attrs.get("label", node),
+        "function_id": node,
         "definition": compact_location({"file": attrs.get("file", ""), "line": attrs.get("line", 0)}),
-        "control_flow": [{"kind": item.get("kind"), "source": compact_location(item.get("source", {}))} for item in attrs.get("control_flow", [])],
+        "control_flow": compact_items(attrs.get("control_flow", [])),
         "calls": calls,
-        "accesses": [{"expression": item.get("expression", ""), "kind": item.get("kind", "field"), "source": compact_location(item.get("source", {}))} for item in attrs.get("accesses", [])],
-        "globals_read": [{"name": item.get("name", ""), "source": compact_location(item.get("source", {}))} for item in attrs.get("globals_read", [])],
-        "globals_written": [{"name": item.get("name", ""), "source": compact_location(item.get("source", {}))} for item in attrs.get("globals_written", [])],
-        "indirect_calls": [{"expression": item.get("expression", ""), "confidence": item.get("confidence", "unknown"), "candidates": item.get("candidates", []), "source": compact_location(item.get("source", {}))} for item in attrs.get("indirect_call_details", [])],
+        "accesses": compact_items([{"expression": item.get("expression", ""), "kind": item.get("kind", "field"), "source": compact_location(item.get("source", {}))} for item in attrs.get("accesses", [])]),
+        "globals_read": compact_items([{"name": item.get("name", ""), "source": compact_location(item.get("source", {}))} for item in attrs.get("globals_read", [])]),
+        "globals_written": compact_items([{"name": item.get("name", ""), "source": compact_location(item.get("source", {}))} for item in attrs.get("globals_written", [])]),
+        "indirect_calls": compact_items([{"expression": item.get("expression", ""), "confidence": item.get("confidence", "unknown"), "candidates": item.get("candidates", []), "source": compact_location(item.get("source", {}))} for item in attrs.get("indirect_call_details", [])]),
     }
 
 
@@ -160,21 +153,22 @@ def compact_structures(structures, graph):
     for _, attrs in graph.nodes(data=True):
         referenced.update(attrs.get("type_references", []))
 
-    by_id = {item["id"]: item for item in structures}
+    by_name = {item.get("name"): item for item in structures if item.get("name")}
     queue = list(referenced)
     while queue:
-        ident = queue.pop()
-        structure = by_id.get(ident)
+        name = queue.pop()
+        structure = by_name.get(name)
         if not structure:
             continue
-        for candidate in structure.get("type_references", []):
-            if candidate not in referenced:
+        field_text = " ".join(field.get("declaration", "") for field in structure.get("fields", []))
+        for candidate in by_name:
+            if candidate not in referenced and re.search(rf"\b{re.escape(candidate)}\b", field_text):
                 referenced.add(candidate)
                 queue.append(candidate)
 
     compact = []
     for structure in structures:
-        if structure["id"] not in referenced:
+        if structure.get("name") not in referenced:
             continue
         fields = []
         for field in structure.get("fields", []):
@@ -187,9 +181,7 @@ def compact_structures(structures, graph):
             })
         declaration = structure.get("declaration", {})
         compact.append({
-            "id": structure["id"],
             "name": structure.get("name", ""),
-            "aliases": structure.get("aliases", []),
             "kind": structure.get("kind", ""),
             "declaration": compact_location(declaration),
             "mapping": {"message_dto": "", "domain": "", "strategy": "unresolved", "exclusion_reason": ""},
@@ -198,14 +190,41 @@ def compact_structures(structures, graph):
     return compact
 
 
-def behavior_for_graph(graph, report, slice_id, mode="compact"):
-    functions = []
-    for node, attrs in sorted(graph.nodes(data=True)):
-        if attrs.get("status") != "resolved":
+def load_symbol_ownership(output):
+    """Load persisted ownership without making it a dependency of C analysis."""
+    ownership = {}
+    state_root = output.resolve().parents[2]
+    for path in sorted((state_root / "plans/units").glob("*-symbol-map.yaml")):
+        try:
+            import yaml
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except (OSError, ValueError, yaml.YAMLError):
             continue
+        for symbol in data.get("symbols", []):
+            if isinstance(symbol, dict) and symbol.get("function_id"):
+                ownership[symbol["function_id"]] = symbol
+    return ownership
+
+
+def behavior_for_graph(graph, report, slice_id, mode="compact", root_functions=None, ownership=None):
+    ownership = ownership or {}
+    root_nodes = {item.get("definition") for item in report.get("roots", []) if item.get("definition")}
+    if root_functions is None:
+        selected_nodes = {node for node, attrs in graph.nodes(data=True) if attrs.get("status") == "resolved"}
+    else:
+        selected_nodes = root_nodes
+    functions = []
+    references = []
+    adapters = []
+    seen_references = set()
+    for node in sorted(selected_nodes):
+        if node not in graph or graph.nodes[node].get("status") != "resolved":
+            continue
+        attrs = graph.nodes[node]
         if mode == "full":
-            functions.append({
+            function = {
                 "c_name": attrs.get("label", node),
+                "function_id": node,
                 "definition": f"{attrs.get('file', '')}:{attrs.get('line', '')}",
                 "status": "generated",
                 "control_flow": attrs.get("control_flow", []),
@@ -214,23 +233,45 @@ def behavior_for_graph(graph, report, slice_id, mode="compact"):
                 "globals_read": attrs.get("globals_read", []),
                 "globals_written": attrs.get("globals_written", []),
                 "indirect_calls": attrs.get("indirect_call_details", []),
-            })
+            }
         else:
-            functions.append(compact_behavior_function(graph, node, attrs))
+            function = compact_behavior_function(graph, node, attrs)
+            function["function_id"] = node
+        functions.append(function)
+        for child in graph.successors(node):
+            if child in selected_nodes or child in seen_references:
+                continue
+            child_attrs = graph.nodes[child]
+            if child_attrs.get("status") != "resolved":
+                continue
+            seen_references.add(child)
+            persisted = ownership.get(child, {})
+            reference = {
+                "function_id": child,
+                "c_name": child_attrs.get("label", child),
+                "owner_slice": persisted.get("owner_slice", ""),
+                "rust_path": persisted.get("rust_path", ""),
+                "role": "adapter" if persisted.get("reexport_required") is False and persisted.get("owner_slice") == slice_id else "reference",
+                "extraction": "contract_only" if not persisted.get("owner_slice") else "not_repeated",
+            }
+            (adapters if reference["role"] == "adapter" else references).append(reference)
     return {
-        "version": 1,
+        "version": 2,
         "kind": "c-behavior",
         "slice": slice_id,
         "status": "draft",
         "source": {"headers": report["headers"], "analyzer": "header_dependency_analyzer"},
+        "scope": {"roots": sorted(root_nodes), "selected_functions": sorted(selected_nodes), "reachable_functions": sorted(node for node in graph if graph.nodes[node].get("status") == "resolved")},
         "functions": functions,
+        "references": references,
+        "adapters": adapters,
         "unresolved_calls": report["unresolved_calls"],
         "ambiguous_calls": report["ambiguous_calls"],
         "cycles": report["cycles"],
         "completion": {
             "source_logic_read": False,
             "branches_mapped": bool(functions),
-            "calls_mapped": bool(report["roots"]) and all(root["status"] == "resolved" for root in report["roots"]) and not bool(report["unresolved_calls"] or report["ambiguous_calls"] or report["indirect_calls"]),
+            "calls_mapped": not bool(report["unresolved_calls"] or report["ambiguous_calls"]),
             "errors_mapped": False,
             "side_effects_mapped": False,
             "test_cases_defined": False,
@@ -295,7 +336,8 @@ def export_slice(project, headers, output, slice_id, compile_commands=None, cach
     }
 
     structures = report["structures"] if mode == "full" else compact_structures(report["structures"], graph)
-    behavior = behavior_for_graph(graph, report, slice_id, mode)
+    ownership = load_symbol_ownership(output)
+    behavior = behavior_for_graph(graph, report, slice_id, mode, root_functions, ownership)
     summary = {
         "functions": len([node for node, attrs in graph.nodes(data=True) if attrs.get("status") == "resolved"]),
         "structures": len(structures),
@@ -318,7 +360,20 @@ def export_slice(project, headers, output, slice_id, compile_commands=None, cach
 
     def generate(stage, generation):
         write_yaml(stage / "data-structures.yaml", data_structures)
-        write_yaml(stage / "behavior.yaml", behavior)
+        behavior_index = dict(behavior)
+        detailed = behavior.get("functions", [])
+        summaries = []
+        for function in detailed:
+            function_id = function.get("function_id", function.get("c_name", "function"))
+            safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", function.get("c_name", "function")).strip("_") or "function"
+            artifact = f"behavior/functions/{safe_name}.yaml"
+            artifact_path = stage / artifact
+            artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            write_yaml(artifact_path, function)
+            summaries.append({"c_name": function.get("c_name", ""), "function_id": function_id, "definition": function.get("definition", ""), "artifact": artifact, "test_cases": function.get("test_cases", [])})
+        behavior_index["functions"] = summaries
+        behavior_index["artifacts"] = {"functions": "behavior/functions/"}
+        write_yaml(stage / "behavior.yaml", behavior_index)
         mapping_items = []
         for structure in structures:
             mapping_items.append({"c_name": structure.get("name", ""), "message_dto": "", "domain": "", "strategy": "unresolved"})
@@ -346,7 +401,7 @@ def main():
     parser.add_argument("--slice", required=True)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--compile-commands", type=Path)
-    parser.add_argument("--function", action="append", help="Function declared or defined in an input header; repeat for multiple roots; omit to select all header functions")
+    parser.add_argument("--function", action="append", default=[], help="Function declared in the input header and belonging to this slice; repeat for multiple roots")
     parser.add_argument("--cache-dir", type=Path)
     parser.add_argument("--mode", choices=("compact", "full"), default="compact")
     parser.add_argument("--replace-reviewed", action="store_true", help="Explicitly archive and replace an enriched or confirmed inventory")
