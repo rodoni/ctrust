@@ -5,8 +5,6 @@ import os
 import socket
 import tempfile
 import time
-from contextlib import contextmanager
-from .models import Diagnostic, canonical_root
 
 class TransactionError(RuntimeError):
     pass
@@ -15,7 +13,7 @@ class WorkspaceLock:
     def __init__(self, root: Path):
         self.root = root.resolve()
         self.lock_dir = self.root / ".locks"
-        self.path = self.lock_dir / "reconcile.lock"
+        self.path = self.lock_dir / "migration.lock"
         self.fd = None
 
     def __enter__(self):
@@ -56,18 +54,6 @@ def safe_path(root: Path, relative: str) -> Path:
         raise TransactionError(f"destination_write_attempt: {relative}") from exc
     return path
 
-@contextmanager
-def staging(root: Path, transaction_id: str):
-    root = root.resolve()
-    staging_root = root / ".staging" / transaction_id
-    staging_root.mkdir(parents=True, exist_ok=False)
-    try:
-        yield staging_root
-    finally:
-        import shutil
-        shutil.rmtree(staging_root, ignore_errors=True)
-
-
 def atomic_write(root: Path, relative: str, content: bytes):
     target = safe_path(root, relative)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -78,6 +64,11 @@ def atomic_write(root: Path, relative: str, content: bytes):
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp, target)
+        directory = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
     finally:
         try:
             os.unlink(temp)

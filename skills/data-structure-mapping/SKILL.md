@@ -1,52 +1,20 @@
 ---
 name: data-structure-mapping
-description: Maps C data structures, pointer semantics and shared-memory layouts before Rust modeling.
+description: "Analise struct, union, enum, typedef, arrays, layout, packing, ponteiros e handles."
 ---
 
-# C Data Structure Mapping
+# data-structure-mapping
 
-Use esta skill durante `c-code-inventory`, antes de extrair comportamento e contratos. Funções e estruturas são inventariadas separadamente: uma função não pode ser portada enquanto os tipos que representam suas entradas, saídas e estado não estiverem compreendidos.
+Analise struct, union, enum, typedef, arrays, layout, packing, ponteiros e handles. Registre ownership, lifetime, aliasing, sincronização e offsets de shared memory; escolha adaptação, simulação ou exclusão consciente. Preencha structures.yaml, todos os campos completion e unresolved: 0 somente após revisão. Ausência de aggregates exige evidência; ponteiros ainda precisam de análise.
 
-## Entrada
+## Protocolo único
 
-Leia o manifesto do slice, os headers transitivos, as definições C, `function-map.yaml`, `call-graph.yaml` e os usos das estruturas pelas funções. Inclua `struct`, `union`, `enum`, `typedef`, arrays, handles opacos e regiões de memória compartilhada.
-
-## Saída
-
-Grave:
-
-```text
-.ctrust/inventory/slices/<slice-id>/data-structures.yaml
-```
-
-Para cada estrutura, registre:
-
-- nome C, typedef, kind e localização da declaração;
-- todos os campos, tipos, ponteiros, arrays e nullabilidade;
-- funções que leem ou escrevem cada estrutura;
-- tamanho, alinhamento, packing, ordem de campos e requisitos `repr(C)`;
-- aliasing, lifetime, ownership e transferência de ownership;
-- se o ponteiro aponta para heap, stack, região global, mmap ou shared memory;
-- sincronização, offsets, handles, processo compartilhado e ABI;
-- classificação da infraestrutura: portar, adaptar, simular ou excluir;
-- estratégia Rust: struct/enum/newtype/handle, ownership, lifetime, módulo e limite `unsafe`;
-- evidências `arquivo:linha` e perguntas abertas.
-
-Shared memory, ponteiros crus e layouts binários não devem ser convertidos diretamente para uma `struct` Rust sem registrar a representação, sincronização e estratégia de acesso. Quando a região não for lógica de negócio, prefira um adapter/handle ou simulação em testes.
-
-## Gate de conclusão
-
-O arquivo só pode ter `status: confirmed` quando estes campos forem verdadeiros:
-
-```yaml
-completion:
-  structures_identified: true
-  fields_mapped: true
-  layout_mapped: true
-  pointer_semantics_mapped: true
-  shared_memory_classified: true
-  rust_strategy_defined: true
-  evidence_recorded: true
-```
-
-Se não houver estruturas relevantes, use `no_structures: true`, mantenha `structures: []` e confirme os mesmos campos com evidência da busca realizada. Não use ausência de uma lista como prova de que não há estruturas.
+- Leia `.ctrust/docs/workflow-v2.md` e consulte `.ctrust/sync.sh resume . --json`.
+- O único estado canônico é `.ctrust/migration.yaml`, schema **3**. Versões anteriores não são suportadas nem convertidas.
+- Inventário, arquitetura e progresso são seções separadas do mesmo snapshot. Não crie `function-map.yaml` ou manifestos paralelos como fontes de progresso.
+- Cada função portada possui um proprietário; consumidores usam referências. Função verificada válida não deve ser implementada novamente.
+- Use `.ctrust/sync.sh prepare . <slice>` para criar rascunhos; não confirme templates sem análise. Estruturas → comportamento → contrato → modelo → organização precedem implementação.
+- Use os argumentos exatos exibidos por `--help` e `status`. A próxima tarefa pode exigir análise/execução de testes antes do comando de registro.
+- Falhas identificam requisito e alcance. Corrija a causa e repita o registro; não altere YAML operacional, não use `next`, `failed`, `reopen` ou `upgrade-state`.
+- Registre implementação, evidência NDJSON e comparação da função pelo ID canônico. Execute `verify-slice` para concluir o slice e `finish` para revisar e encerrar a migração.
+- Antes de encerrar uma sessão, consulte `resume`, registre decisões nos artefatos e gere `checkpoint`. Status e checkpoint não substituem evidências.

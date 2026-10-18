@@ -1,82 +1,20 @@
 ---
 name: c-behavior-extraction
-description: Extracts the observable behavior of each C migration slice before contract confirmation.
+description: "Após estruturas confirmadas, leia o corpo C de cada função própria do slice."
 ---
 
-# C Behavior Extraction
+# c-behavior-extraction
 
-Esta skill é obrigatória depois de `c-code-inventory` e antes de `contract-extraction`. O inventário localiza funções e dependências; esta skill registra o que a implementação C realmente faz em cada caminho observável.
+Após estruturas confirmadas, leia o corpo C de cada função própria do slice. Registre branches, chamadas, pré/pós-condições, erros, efeitos observáveis e casos normal/boundary/error. Dependências compartilhadas são referências ao proprietário, não novos ports. Preencha behavior.yaml com evidências, completion e dúvidas resolvidas.
 
-## Entrada
+## Protocolo único
 
-Leia, nesta ordem:
-
-1. `.ctrust/migration.yaml`;
-2. `.ctrust/current-context.md`;
-3. `.ctrust/status/slices.md`;
-4. `.ctrust/inventory/slices/<slice-id>/manifest.yaml`;
-5. `function-map.yaml`, `callers.yaml`, `dependencies.yaml` e `call-graph.yaml`;
-6. os headers, a definição C, callers/callees e testes de referência.
-
-Nunca use a interface Rust como fonte primária para inferir comportamento.
-
-## Extração obrigatória
-
-Para cada função C do slice, registre em `.ctrust/inventory/slices/<slice-id>/behavior.yaml`:
-
-- arquivo e intervalo de linhas da implementação;
-- entradas, validade, nullabilidade e limites;
-- saída de sucesso;
-- códigos/condições de erro;
-- fluxo de controle e branches relevantes;
-- chamadas diretas, callbacks e ponteiros de função;
-- estado global lido ou alterado;
-- efeitos colaterais;
-- alocação, liberação e ownership;
-- casos normais, limites, erros e recursos inválidos;
-- evidências `arquivo:linha`, teste ou comando reproduzível;
-- diferenças permitidas, sempre justificadas.
-
-Não copie grandes trechos do C. Registre fatos e referências precisas.
-
-## Gate de conclusão
-
-O arquivo só pode ter `status: confirmed` quando todos estes campos forem verdadeiros:
-
-```yaml
-completion:
-  source_logic_read: true
-  branches_mapped: true
-  calls_mapped: true
-  errors_mapped: true
-  side_effects_mapped: true
-  test_cases_defined: true
-```
-
-`open_questions` não pode conter dúvidas críticas sem decisão. Funções sem definição, branches não mapeados, chamadas indiretas não classificadas ou efeitos colaterais desconhecidos bloqueiam o slice.
-
-## Saída para a próxima fase
-
-Após confirmar `behavior.yaml`, atualize a próxima ação e encaminhe o mesmo slice para `contract-extraction`. O contrato deve derivar deste artefato, mas não o substituir. Não crie a implementação Rust nesta fase.
-
-## Escopo por raízes e ownership
-
-`behavior.yaml` deve detalhar somente as funções raiz declaradas em `source.functions` para a slice. O grafo transitivo completo permanece em `dependencies.yaml`, `callers.yaml` e `function-map.yaml`, mas funções já owned por slices verificadas não devem ser reextraídas.
-
-Use o `symbol-map.yaml` para classificar dependências:
-
-- `references`: funções implementadas por outro `owner_slice`, com `rust_path` canônico;
-- `adapters`: infraestrutura externa classificada como `adapter`;
-- `functions`: somente as raízes próprias da slice.
-
-O schema de `behavior.yaml` exige `functions` como lista. Não use `behaviors` como mapa de nomes. `test_cases` funcionais podem ser detalhados por função, mas não devem transformar dependências transitivas em novas funções da slice.
-
-## Extração incremental
-
-Leia uma função por vez usando o artifact detalhado:
-
-```bash
-.ctrust/sync.sh behavior-function . <slice-id> <c-function-name>
-```
-
-O comando carrega `.ctrust/inventory/slices/<slice>/behavior/functions/<function>.yaml`, atualiza a unidade ativa e não recarrega o comportamento completo da slice. Confirme o artifact individual antes de avançar para a próxima função.
+- Leia `.ctrust/docs/workflow-v2.md` e consulte `.ctrust/sync.sh resume . --json`.
+- O único estado canônico é `.ctrust/migration.yaml`, schema **3**. Versões anteriores não são suportadas nem convertidas.
+- Inventário, arquitetura e progresso são seções separadas do mesmo snapshot. Não crie `function-map.yaml` ou manifestos paralelos como fontes de progresso.
+- Cada função portada possui um proprietário; consumidores usam referências. Função verificada válida não deve ser implementada novamente.
+- Use `.ctrust/sync.sh prepare . <slice>` para criar rascunhos; não confirme templates sem análise. Estruturas → comportamento → contrato → modelo → organização precedem implementação.
+- Use os argumentos exatos exibidos por `--help` e `status`. A próxima tarefa pode exigir análise/execução de testes antes do comando de registro.
+- Falhas identificam requisito e alcance. Corrija a causa e repita o registro; não altere YAML operacional, não use `next`, `failed`, `reopen` ou `upgrade-state`.
+- Registre implementação, evidência NDJSON e comparação da função pelo ID canônico. Execute `verify-slice` para concluir o slice e `finish` para revisar e encerrar a migração.
+- Antes de encerrar uma sessão, consulte `resume`, registre decisões nos artefatos e gere `checkpoint`. Status e checkpoint não substituem evidências.

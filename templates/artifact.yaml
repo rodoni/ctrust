@@ -1,0 +1,8 @@
+# Prefer generated drafts: .ctrust/sync.sh prepare . <slice>
+version: 3
+slice: base
+stage: contract
+status: draft
+review: ""
+evidence: []
+functions: []

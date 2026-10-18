@@ -1,0 +1,15 @@
+# Export a real plan with: .ctrust/sync.sh architecture . --export architecture.yaml
+version: 3
+inventory: "<fingerprint from inventory>"
+slices:
+  base:
+    crate: crates/domain
+    module: base
+assignments:
+  "c:src/common.c:normalize_value":
+    role: port
+    slice: base
+    rust_name: normalize_value
+    reason: ""
+# Every catalog entry needs a decision. Non-port roles adapt/simulate/exclude
+# require a reason. Required dependencies cannot simply be excluded.

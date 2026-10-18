@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import analyze
-from export_inventory import behavior_for_graph, compact_structures, export_slice, merge_analyses
+from export_inventory import compact_behavior_function, compact_structures, export_inventory, merge_analyses
 
 
 class RegressionTests(unittest.TestCase):
@@ -57,6 +57,27 @@ class RegressionTests(unittest.TestCase):
         next(cache.glob('*.json')).write_text('{')
         self.assertEqual(analyze.parse_file_cached(root / 'a.c', cache)[0][0]['name'], 'root')
 
+    def test_valid_json_cache_corruption_is_rebuilt(self):
+        root = self.project('source', 'void root(void);', {'a.c': 'void root(void) {}'})
+        cache = self.root / 'cache'
+        analyze.parse_file_cached(root / 'a.c', cache)
+        path = next(cache.glob('*.json'))
+        envelope = json.loads(path.read_text())
+        envelope['bundle']['definitions'][0]['name'] = 'wrong'
+        path.write_text(json.dumps(envelope))
+        self.assertEqual(analyze.parse_file_cached(root / 'a.c', cache)[0][0]['name'], 'root')
+        path.write_text('[]')
+        self.assertEqual(analyze.parse_file_cached(root / 'a.c', cache)[0][0]['name'], 'root')
+
+    def test_missing_include_is_reported_and_architecture_editor_can_be_exported(self):
+        root = self.project('source', 'void root(void);', {'a.c': '#include "missing.h"\nvoid root(void) {}'})
+        graph, report = analyze.analyze(root, root / 'api.h')
+        self.assertEqual(report['unresolved_includes'][0]['include'], '"missing.h"')
+        output = self.root / 'analysis'
+        result = subprocess.run([sys.executable, str(Path(analyze.__file__)), '--project', str(root), '--header', str(root / 'api.h'), '--output', str(output), '--architecture'], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Exportar plano JSON', (output / 'architecture.html').read_text())
+
     def test_parameter_and_local_callbacks_do_not_resolve_to_global_functions(self):
         root = self.project('source', 'void root(void (*cb)(void));', {
             'a.c': 'void cb(void) {}\nvoid root(void (*cb)(void)) { cb(); { void (*local)(void) = cb; local(); } }',
@@ -88,7 +109,7 @@ class RegressionTests(unittest.TestCase):
         root = self.project('source', 'void root(void);', {'a.c': 'void root(void) {}'})
         output = self.root / 'inventory'
         with self.assertRaisesRegex(ValueError, 'typo'):
-            export_slice(root, [root / 'api.h'], output, 'demo-001', root_functions=['root', 'typo'])
+            export_inventory(root, [root / 'api.h'], output, root_functions=['root', 'typo'])
         self.assertFalse(output.exists())
 
     def test_selection_spans_multiple_headers(self):
@@ -104,22 +125,22 @@ class RegressionTests(unittest.TestCase):
             'a.c': 'void first(void) {}\nvoid second(void) {}',
         })
         output = self.root / 'inventory'
-        command = [sys.executable, str(Path(analyze.__file__).with_name('export_inventory.py')), '--project', str(root), '--header', str(root / 'api.h'), '--slice', 'demo-001', '--output', str(output)]
+        command = [sys.executable, str(Path(analyze.__file__).with_name('export_inventory.py')), '--project', str(root), '--header', str(root / 'api.h'), '--output', str(output)]
         result = subprocess.run(command, capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        from workflow import load
-        self.assertEqual({item['c_name'] for item in load(output / 'function-map.yaml')['functions']}, {'first', 'second'})
+        from migration.store import read_yaml
+        self.assertEqual({item['label'] for item in read_yaml(output)['functions'].values()}, {'first', 'second'})
 
-    def test_unresolved_and_ambiguous_roots_are_exported_as_blocked(self):
+    def test_unresolved_and_ambiguous_roots_are_exported_without_progress(self):
         root = self.project('source', 'void missing(void); void duplicate(void);', {
             'a.c': 'void duplicate(void) {}', 'b.c': 'void duplicate(void) {}',
         })
         output = self.root / 'inventory'
-        export_slice(root, [root / 'api.h'], output, 'demo-001')
-        from workflow import load
-        functions = load(output / 'function-map.yaml')['functions']
-        self.assertEqual({(item['c_name'], item['status'], item['state']) for item in functions}, {('missing', 'unresolved', 'blocked'), ('duplicate', 'ambiguous', 'blocked')})
-        self.assertFalse(load(output / 'behavior.yaml')['completion']['calls_mapped'])
+        export_inventory(root, [root / 'api.h'], output)
+        from migration.store import read_yaml
+        functions = read_yaml(output)['functions'].values()
+        self.assertEqual({(item['label'], item['status']) for item in functions}, {('missing', 'unresolved'), ('duplicate', 'ambiguous')})
+        self.assertTrue(all('state' not in item for item in read_yaml(output)['functions'].values()))
 
     def test_typedef_alias_and_body_types_reach_nested_structures(self):
         root = self.project('source',
@@ -198,14 +219,15 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(len(structures), 3)
         self.assertEqual({field['name'] for item in structures for field in item['fields']}, {'nested', 'value', 'local'})
 
-    def test_indirect_calls_prevent_completion_and_keep_candidate_evidence(self):
+    def test_indirect_calls_preserve_uncertainty_and_candidate_evidence(self):
         root = self.project('source', 'void root(void);', {
             'a.c': 'void process(void) {}\nvoid root(void) { object.process(); }',
         })
         graph, report = merge_analyses(root, [root / 'api.h'], None)
-        behavior = behavior_for_graph(graph, report, 'demo-001')
-        self.assertFalse(behavior['completion']['calls_mapped'])
-        details = behavior['functions'][0]['indirect_calls'][0]
+        self.assertTrue(report['indirect_calls'])
+        node = report['roots'][0]['definition']
+        behavior = compact_behavior_function(graph, node, graph.nodes[node])
+        details = behavior['indirect_calls'][0]
         self.assertEqual(details['confidence'], 'inferred')
         self.assertEqual(details['candidates'], ['a.c:1:process'])
         self.assertTrue(details['source'].endswith('a.c:2'))

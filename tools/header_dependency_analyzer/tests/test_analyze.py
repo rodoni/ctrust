@@ -77,47 +77,32 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(report['ambiguous_calls'][0]['name'], 'shared')
         self.assertNotIn('src/b.c:1:shared', graph)
 
-    def test_exported_map_uses_recovery_schema_and_preserves_function_identity(self):
-        from export_inventory import export_slice
+    def test_global_inventory_preserves_unique_identity_and_uncertainty(self):
+        from export_inventory import export_inventory
         temp, root = self.make_project()
         self.addCleanup(temp.cleanup)
         header = root / 'include/api.h'
         header.write_text('void root(void);\n')
         (root / 'src/api.c').write_text('void leaf(void) {}\nvoid root(void) { leaf(); missing(); }\n')
-        output = root / 'inventory'
-        export_slice(root, [header], output, 'demo-001')
-        import sys
-        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-        from workflow import load
-        data = load(output / 'function-map.yaml')
-        self.assertEqual(data['version'], 2)
-        self.assertEqual(data['slice'], 'demo-001')
-        self.assertEqual(len({fn['function_id'] for fn in data['functions']}), len(data['functions']))
-        by_name = {fn['c_name']: fn for fn in data['functions']}
-        self.assertEqual(by_name['root']['state'], 'planned')
-        self.assertEqual(by_name['missing']['state'], 'blocked')
-        self.assertEqual(by_name['root']['evidence_refs'], [])
+        output = root / 'inventory.yaml'
+        data = export_inventory(root, [header], output)
+        self.assertEqual(len(data['functions']), 3)
+        by_name = {fn['label']: fn for fn in data['functions'].values()}
+        self.assertEqual(by_name['root']['id'], 'c:src/api.c:root')
+        self.assertEqual(by_name['missing']['status'], 'unresolved')
+        self.assertNotIn('state', by_name['root'])
+        self.assertTrue(output.is_file())
 
-    def test_behavior_export_is_scoped_to_roots_and_preserves_transitive_dependencies(self):
-        from export_inventory import export_slice
+    def test_inventory_keeps_full_transitive_graph_and_compile_database_scope(self):
+        from export_inventory import export_inventory
         temp, root = self.make_project()
         self.addCleanup(temp.cleanup)
         header = root / 'include/api.h'
         header.write_text('void root(void);\n')
         (root / 'src/api.c').write_text('void leaf(void) {}\nvoid root(void) { leaf(); }\n')
-        output = root / 'inventory'
-        export_slice(root, [header], output, 'demo-001', root_functions=['root'])
-        import sys
-        sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-        from workflow import load
-        behavior = load(output / 'behavior.yaml')
-        self.assertEqual([item['c_name'] for item in behavior['functions']], ['root'])
-        self.assertTrue((output / 'behavior/functions/root.yaml').is_file())
-        self.assertEqual(behavior['functions'][0]['artifact'], 'behavior/functions/root.yaml')
-        self.assertEqual(behavior['scope']['reachable_functions'], ['src/api.c:1:leaf', 'src/api.c:2:root'])
-        self.assertEqual(behavior['references'][0]['c_name'], 'leaf')
-        dependencies = load(output / 'dependencies.yaml')
-        self.assertEqual(len(dependencies['edges']), 1)
+        data = export_inventory(root, [header], root / 'inventory.yaml', root_functions=['root'])
+        self.assertEqual(data['roots'], ['c:src/api.c:root'])
+        self.assertEqual(data['functions']['c:src/api.c:root']['calls'], ['c:src/api.c:leaf'])
 
         temp, root = self.make_project()
         self.addCleanup(temp.cleanup)
