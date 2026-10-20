@@ -24,7 +24,8 @@ Update commands:
 
 Utility commands:
   init <project>             Initialize schema 3 (new migrations only)
-  inventory <project> --source <C-root> --header <relative.h> [--function <name>]
+  inventory <project> --source <original-C-root> [--header <relative.h> ...] [--function <name>]
+                               Omit --header to discover headers recursively under the C root.
   architecture <project> --export <plan.yaml>
   architecture <project> --plan <plan.yaml> [--confirm]
   prepare <project> <slice>   Create draft analysis artifacts

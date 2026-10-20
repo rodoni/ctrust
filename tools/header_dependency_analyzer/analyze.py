@@ -20,7 +20,7 @@ LANG = Language(tree_sitter_c.language())
 SOURCE_SUFFIXES = {'.c'}
 HEADER_SUFFIXES = {'.h'}
 ANALYZABLE_SUFFIXES = SOURCE_SUFFIXES | HEADER_SUFFIXES
-ANALYZER_VERSION = '3'
+ANALYZER_VERSION = '4'
 
 
 def text(node, source):
@@ -433,10 +433,18 @@ def included_files(path, bundles, directories, forced=(), missing=None):
             name = include.strip('"<>')
             search = ([current.parent] if not include.startswith('<') else []) + directories
             target = next((candidate for directory in search if (candidate := (directory / name).resolve()) in bundles), None)
+            # Legacy projects often include a header by basename while keeping
+            # it several directories below the source root. Resolve that only
+            # when the recursive project index has exactly one matching file.
+            if target is None and not include.startswith('<'):
+                matches = [candidate for candidate in bundles if candidate.name == Path(name).name]
+                if len(matches) == 1:
+                    target = matches[0]
             if target:
                 follow(target)
             elif missing is not None:
-                missing.append({'file': str(current), 'include': include, 'searched': [str(directory) for directory in search]})
+                matches = [str(candidate) for candidate in bundles if candidate.name == Path(name).name] if not include.startswith('<') else []
+                missing.append({'file': str(current), 'include': include, 'searched': [str(directory) for directory in search], 'recursive_candidates': matches})
     follow(path, forced)
     return found
 

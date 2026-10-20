@@ -38,6 +38,11 @@ def collect(source, headers, functions=None, compile_commands=None, cache=None):
         sys.path.insert(0, str(analyzer_dir))
     from export_inventory import merge_analyses
     source = Path(source).resolve()
+    if not headers:
+        headers = sorted(str(path.relative_to(source)) for path in source.rglob('*')
+                         if path.is_file() and path.suffix.lower() == '.h')
+        if not headers:
+            raise MigrationError(f'No C header files found recursively under source root: {source}; provide --header explicitly')
     def snapshot():
         return {str(p.relative_to(source)): file_hash(p) for p in sorted(source.rglob('*')) if p.is_file() and p.suffix in {'.c', '.h'}}
     before_files = snapshot()

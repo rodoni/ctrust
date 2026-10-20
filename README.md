@@ -47,8 +47,9 @@ Na raiz do projeto destino:
 
 ```bash
 .ctrust/sync.sh init .
-.ctrust/sync.sh inventory . --source /caminho/legado --header include/api.h
-# --header pode se repetir; --function limita as raízes, mantendo dependências.
+.ctrust/sync.sh inventory . --source /caminho/legado
+# --source é a raiz original do C; sem --header, headers são descobertos recursivamente.
+# --header pode se repetir para limitar a análise; --function limita raízes mantendo dependências.
 .ctrust/sync.sh architecture . --export architecture.yaml
 .ctrust/sync.sh report .
 ```
@@ -159,4 +160,4 @@ O controlador valida a estrutura das evidências e executa os gates Cargo. Ele n
 
 `tools/migration/` contém snapshot, inventário, arquitetura, decisão única, execução, CLI e HTML. `tools/header_dependency_analyzer/` contém análise C. Os testes do workflow anterior foram substituídos por testes do contrato schema 3, incluindo função compartilhada, recuperação, idempotência, publicação e revisão final; as regressões de análise C permanecem cobertas.
 
-A análise C não executa o pré-processador. `compile_commands.json` seleciona unidades de tradução e fornece caminhos de includes/forced includes; macros, condicionais, aliases complexos e callbacks ainda exigem revisão. O inventário não determina sozinho se código pode ser removido.
+A análise C não executa o pré-processador. `compile_commands.json` seleciona unidades de tradução e fornece caminhos de includes/forced includes. Headers referenciados por caminho local são seguidos; includes entre aspas com apenas basename são procurados recursivamente quando há um único candidato. Colisões permanecem visíveis como não resolvidas e precisam de `compile_commands.json`/`-I` ou decisão manual. Macros, condicionais, aliases complexos e callbacks ainda exigem revisão. O inventário não determina sozinho se código pode ser removido.

@@ -26,7 +26,7 @@ def parser():
     command = commands.add_parser('inventory')
     command.add_argument('project', type=Path)
     command.add_argument('--source', type=Path, required=True)
-    command.add_argument('--header', action='append', required=True)
+    command.add_argument('--header', action='append', default=[], help='Header relative to --source; repeat as needed. Omit to scan headers recursively.')
     command.add_argument('--function', action='append')
     command.add_argument('--compile-commands', type=Path)
     command = commands.add_parser('architecture')
