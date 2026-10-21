@@ -37,6 +37,7 @@ def collect(source, headers, functions=None, compile_commands=None, cache=None):
     if str(analyzer_dir) not in sys.path:
         sys.path.insert(0, str(analyzer_dir))
     from export_inventory import merge_analyses
+    from analyze import cached_bundle
     source = Path(source).resolve()
     if not headers:
         headers = sorted(str(path.relative_to(source)) for path in source.rglob('*')
@@ -48,6 +49,10 @@ def collect(source, headers, functions=None, compile_commands=None, cache=None):
     before_files = snapshot()
     before_database = file_hash(compile_commands) if compile_commands else None
     headers = [(source / value).resolve() for value in headers]
+    prototypes = {}
+    for header in headers:
+        for item in cached_bundle(header, cache).get('function_declarations', []):
+            prototypes.setdefault(item['name'], item)
     graph, report = merge_analyses(source, headers, compile_commands, cache, functions)
     identities = {}
     for node, attrs in graph.nodes(data=True):
@@ -71,8 +76,11 @@ def collect(source, headers, functions=None, compile_commands=None, cache=None):
             roots.append(identities[root['definition']])
         else:
             identity = 'root:' + root['name']
-            catalog[identity] = {'id': identity, 'label': root['name'], 'status': root['status'], 'candidates': root.get('candidates', []), 'calls': []}
+            prototype = prototypes.get(root['name'], {})
+            catalog[identity] = {'id': identity, 'label': root['name'], 'status': root['status'], 'candidates': root.get('candidates', []), 'calls': [], **({'signature': prototype['signature'], 'declaration': {'file': str(Path(prototype['file']).relative_to(source)), 'line': prototype['line']}} if prototype else {})}
             roots.append(identity)
+    if not catalog:
+        raise MigrationError(f'No functions were indexed from headers under source root: {source}; check header declarations and source file extensions')
     # Include all scanned sources and headers: changes in type declarations or
     # candidate resolution can affect the scoped graph even outside its nodes.
     files = snapshot()

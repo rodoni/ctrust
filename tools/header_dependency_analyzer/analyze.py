@@ -20,7 +20,7 @@ LANG = Language(tree_sitter_c.language())
 SOURCE_SUFFIXES = {'.c'}
 HEADER_SUFFIXES = {'.h'}
 ANALYZABLE_SUFFIXES = SOURCE_SUFFIXES | HEADER_SUFFIXES
-ANALYZER_VERSION = '4'
+ANALYZER_VERSION = '5'
 
 
 def text(node, source):
@@ -274,6 +274,7 @@ def parse_file_bundle(path):
         raise
     definitions = []
     declarations = []
+    function_declarations = []
     objects = {}
     aliases = {}
     includes = []
@@ -302,8 +303,16 @@ def parse_file_bundle(path):
                 if path.suffix == '.h':
                     declarations.append(detail['name'])
         elif node.type == 'declaration':
-            declarations.extend(declaration_names(node, source))
-    return {'definitions': definitions, 'declarations': sorted(set(declarations)), 'structures': extract_structures(tree, source, path), 'objects': objects, 'aliases': aliases, 'includes': includes}
+            names = declaration_names(node, source)
+            declarations.extend(names)
+            for name in names:
+                function_declarations.append({
+                    'name': name,
+                    'signature': text(node, source).rstrip(';').strip(),
+                    'file': str(path),
+                    'line': node.start_point.row + 1,
+                })
+    return {'definitions': definitions, 'declarations': sorted(set(declarations)), 'function_declarations': function_declarations, 'structures': extract_structures(tree, source, path), 'objects': objects, 'aliases': aliases, 'includes': includes}
 
 
 def ancestors(node):
@@ -335,7 +344,7 @@ def cached_bundle(path, cache_dir=None):
             envelope = json.loads(cache_file.read_text(encoding='utf-8'))
             result = envelope.get('bundle') if isinstance(envelope, dict) else None
             checksum = hashlib.sha256(json.dumps(result, sort_keys=True).encode()).hexdigest()
-            if isinstance(envelope, dict) and envelope.get('key') == digest and envelope.get('checksum') == checksum and isinstance(result, dict) and all(isinstance(result.get(k), list) for k in ('definitions', 'declarations', 'structures', 'includes')) and all(isinstance(result.get(k), dict) for k in ('objects', 'aliases')):
+            if isinstance(envelope, dict) and envelope.get('key') == digest and envelope.get('checksum') == checksum and isinstance(result, dict) and all(isinstance(result.get(k), list) for k in ('definitions', 'declarations', 'function_declarations', 'structures', 'includes')) and all(isinstance(result.get(k), dict) for k in ('objects', 'aliases')):
                 return result
         except (ValueError, UnicodeError):
             pass
@@ -559,7 +568,7 @@ def analyze(project, header, compile_commands=None, cache_dir=None, root_functio
         if definition['id'] in visited:
             return
         visited.add(definition['id'])
-        graph.add_node(definition['id'], label=definition['name'], file=definition['file'], line=definition['line'], status='resolved', static=definition['static'], translation_unit=definition.get('translation_unit', ''), source_hash=definition['source_hash'], **{key: definition.get(key, []) for key in ('control_flow', 'accesses', 'globals_read', 'globals_written', 'indirect_call_details', 'type_references')})
+        graph.add_node(definition['id'], label=definition['name'], file=definition['file'], line=definition['line'], signature=definition['signature'], status='resolved', static=definition['static'], translation_unit=definition.get('translation_unit', ''), source_hash=definition['source_hash'], **{key: definition.get(key, []) for key in ('control_flow', 'accesses', 'globals_read', 'globals_written', 'indirect_call_details', 'type_references')})
         for call in sorted(set(definition['calls'])):
             target = resolve(call, definition)
             if isinstance(target, dict):
