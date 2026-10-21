@@ -56,6 +56,21 @@ Na raiz do projeto destino:
 
 Abra `.ctrust/reports/architecture.html` para buscar funções, examinar chamadas/consumidores, filtrar funções compartilhadas, criar slices e atribuir grupos. Reabra ou exporte o plano JSON; JSON também é aceito como YAML pelo controlador. O HTML é um arquivo autônomo, representa uma revisão e não altera o estado operacional.
 
+Para migrar apenas parte do legado, mantenha `--source` na raiz dessa parte e acrescente as dependências explicitamente:
+
+```bash
+.ctrust/sync.sh inventory . --source /caminho/aurora/modules/navigation/src \
+  --include-dir /caminho/aurora/modules/sensors/include \
+  --include-dir /caminho/aurora/modules/storage/include \
+  --include-dir /caminho/aurora/shared/include
+# Para analisar também implementações C de um módulo externo:
+# acrescente --dependency-root /caminho/modulo
+```
+
+`--include-dir` indexa headers recursivamente e acrescenta o diretório à busca de includes; `--dependency-root` indexa fontes C e headers recursivamente para resolver chamadas transitivas. Ambas as opções podem se repetir e seus caminhos relativos partem do diretório atual. Headers adicionais não viram entradas do inventário: `--header` (relativo a `--source`) e `--function` continuam definindo as raízes. Funções externas alcançadas por chamadas entram no catálogo e precisam de tratamento no plano; estruturas externas permanecem disponíveis para análise. Mudanças nos arquivos dessas dependências invalidam o inventário.
+
+Use `--compile-commands /caminho/compile_commands.json` para fornecer caminhos de include do build e distinguir headers com nomes iguais. Os diretórios externos ainda precisam ser fornecidos com `--include-dir` ou `--dependency-root` para serem indexados. Como alternativa, uma raiz comum em `--source` com `--header` explícito permite analisar os diretórios irmãos. Após mudar o inventário, exporte novamente o plano, revise as atribuições e execute `architecture --confirm`; a mudança invalida a arquitetura anterior.
+
 O plano classifica **cada entrada do catálogo** com `port`, `adapt`, `simulate` ou `exclude`. Cada função portada pertence a exatamente um slice. Os demais tratamentos exigem justificativa; uma dependência chamada por função portada não pode ser simplesmente excluída. Callbacks/chamadas indiretas exigem `indirect_decision` revisada no plano. Incerteza de análise nunca é prova de resolução. Headers locais ausentes exigem fornecimento do arquivo e novo inventário ou decisão explícita `include_decisions` com `role` e `reason`; headers de sistema ausentes permanecem visíveis para revisão de tipos. Os gates Cargo usam modo offline; disponibilize as dependências do workspace antes da verificação.
 
 Exemplo de agrupamento:

@@ -27,6 +27,8 @@ def parser():
     command.add_argument('project', type=Path)
     command.add_argument('--source', type=Path, required=True)
     command.add_argument('--header', action='append', default=[], help='Header relative to --source; repeat as needed. Omit to scan headers recursively.')
+    command.add_argument('--include-dir', type=Path, action='append', default=[], help='Additional header directory; repeat as needed. Relative to the current directory.')
+    command.add_argument('--dependency-root', type=Path, action='append', default=[], help='Additional C module directory; indexes sources and headers without adding entry roots. Repeat as needed.')
     command.add_argument('--function', action='append')
     command.add_argument('--compile-commands', type=Path)
     command = commands.add_parser('architecture')
@@ -147,7 +149,7 @@ def execute(args, store, state):
     command = args.command
     if command == 'inventory':
         root = args.source.resolve()
-        inventory = collect(root, args.header, args.function, args.compile_commands, store.root / 'cache' / 'analyzer')
+        inventory = collect(root, args.header, args.function, args.compile_commands, store.root / 'cache' / 'analyzer', args.include_dir, args.dependency_root)
         source = {'root': str(root), 'headers': args.header, 'functions': args.function, 'compile_commands': str(args.compile_commands.resolve()) if args.compile_commands else None}
         if state['inventory'] != inventory or state['source'] != source:
             state['source'] = source

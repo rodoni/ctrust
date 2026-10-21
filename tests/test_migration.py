@@ -246,6 +246,26 @@ class MigrationTests(unittest.TestCase):
         structures = scoped_structures(inventory, ['c:api.c:first'])
         self.assertEqual([item['name'] for item in structures], ['A'])
 
+    def test_external_dependencies_do_not_become_entry_roots(self):
+        from migration.core import source_current
+        includes = self.root / 'includes'
+        module = self.root / 'external'
+        includes.mkdir()
+        module.mkdir()
+        (includes / 'external.h').write_text('struct Value { int x; }; int helper(struct Value *v); int unrelated(void);')
+        (module / 'helper.c').write_text('#include <external.h>\nint helper(struct Value *v) { return v->x; }\nint unrelated(void) { return 0; }')
+        (self.source / 'api.h').write_text('int entry(void);')
+        (self.source / 'api.c').write_text('#include "external.h"\nint entry(void) { struct Value v; return helper(&v); }')
+        inventory = collect(self.source, [], include_dirs=[includes], dependency_roots=[module])
+        names = {fn['label'] for fn in inventory['functions'].values()}
+        self.assertEqual(names, {'entry', 'helper'})
+        self.assertEqual([inventory['functions'][fid]['label'] for fid in inventory['roots']], ['entry'])
+        self.assertFalse(inventory['unresolved_includes'])
+        state = {'source': {'root': str(self.source)}, 'inventory': inventory}
+        self.assertTrue(source_current(state))
+        (includes / 'external.h').write_text('int helper(void);')
+        self.assertFalse(source_current(state))
+
     def test_inventory_change_during_analysis_is_not_published(self):
         import export_inventory
         original = export_inventory.merge_analyses

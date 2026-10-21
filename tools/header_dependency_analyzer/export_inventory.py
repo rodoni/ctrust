@@ -13,7 +13,7 @@ from analyze import analyze, parse_file
 from migration.transaction import atomic_write
 
 
-def merge_analyses(project, headers, compile_commands, cache_dir=None, root_functions=None):
+def merge_analyses(project, headers, compile_commands, cache_dir=None, root_functions=None, include_dirs=None, dependency_roots=None):
     graph = nx.DiGraph()
     reports = []
     declared = set()
@@ -25,7 +25,7 @@ def merge_analyses(project, headers, compile_commands, cache_dir=None, root_func
             selected_functions = [name for name in root_functions if name in declarations]
             if not selected_functions:
                 continue
-        current_graph, report = analyze(project, header, compile_commands, cache_dir, selected_functions)
+        current_graph, report = analyze(project, header, compile_commands, cache_dir, selected_functions, include_dirs, dependency_roots)
         graph = nx.compose(graph, current_graph)
         reports.append(report)
 

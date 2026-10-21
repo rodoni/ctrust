@@ -60,7 +60,7 @@ def architecture_errors(state, plan):
         key = item['file'] + '::' + item['include']
         decision = include_decisions.get(key, {})
         if not isinstance(decision, dict) or decision.get('role') not in ('adapt', 'simulate', 'exclude') or not isinstance(decision.get('reason'), str) or not decision['reason'].strip():
-            errors.append(f'Missing project header {key}; provide header and refresh inventory or record include_decisions role/reason')
+            errors.append(f'Missing project header {key}; refresh inventory with --include-dir for additional headers or --dependency-root for external C modules. For duplicate header names, supply --compile-commands with the build include paths. Alternatively record include_decisions role/reason for an intentionally unavailable dependency')
     functions = inventory['functions']
     if set(assignments) != set(functions):
         errors.append('Assignments must classify every inventory function exactly once')
@@ -166,7 +166,8 @@ def owned(state, sid):
 def source_current(state):
     root = Path(state['source']['root'])
     inventory = state['inventory']
-    current = {str(p.relative_to(root)): file_hash(p) for p in sorted(root.rglob('*')) if p.is_file() and p.suffix in {'.c', '.h'}}
+    from .inventory import source_snapshot
+    current = source_snapshot(root, inventory.get('include_dirs', []), inventory.get('dependency_roots', []))
     database = inventory.get('compile_commands')
     return current == inventory['files'] and (not database or file_hash(database['path']) == database['hash'])
 

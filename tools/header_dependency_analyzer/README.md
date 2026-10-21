@@ -12,6 +12,8 @@ O workflow recomendado é `.ctrust/sync.sh inventory . --source /legado`. `--sou
 
 O analisador produz `functions.json`, `dependencies.json`, `hierarchy.txt`, `graph.graphml` e `hierarchy.html`. Use `--architecture` no analisador para acrescentar `architecture.html` à saída. No workflow, o mesmo editor é gerado por `.ctrust/sync.sh report .` após o inventário; seleção e agrupamento são confirmados pelo controlador.
 
+No controlador, `inventory --include-dir /headers` acrescenta headers externos e caminhos de busca; `--dependency-root /modulo` acrescenta fontes C e headers externos. As opções são repetíveis e não acrescentam headers-raiz: as entradas continuam sob `--source`. Dependências alcançadas aparecem no catálogo e seus arquivos participam da verificação de atualização do inventário. A API Python `analyze`/`merge_analyses` aceita os mesmos caminhos em `include_dirs` e `dependency_roots`.
+
 ## Resolução e limites
 
 - Chamadas diretas seguem definições transitivamente. Definições múltiplas ficam ambíguas; implementações ausentes ficam não resolvidas.

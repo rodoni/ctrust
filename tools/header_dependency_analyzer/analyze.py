@@ -458,7 +458,7 @@ def included_files(path, bundles, directories, forced=(), missing=None):
     return found
 
 
-def analyze(project, header, compile_commands=None, cache_dir=None, root_functions=None):
+def analyze(project, header, compile_commands=None, cache_dir=None, root_functions=None, include_dirs=None, dependency_roots=None):
     project = Path(project).expanduser().resolve()
     header = Path(header).expanduser().resolve()
     if not project.is_dir():
@@ -467,17 +467,33 @@ def analyze(project, header, compile_commands=None, cache_dir=None, root_functio
         raise ValueError('Header must exist inside the project directory')
     compile_database = load_compile_commands(compile_commands, project) if compile_commands is not None else None
     all_files, compile_database = _project_files(project, compile_database)
+    include_dirs = [Path(value).resolve() for value in (include_dirs or [])]
+    dependency_roots = [Path(value).resolve() for value in (dependency_roots or [])]
+    extra = set()
+    for directory in include_dirs + dependency_roots:
+        if not directory.is_dir():
+            raise ValueError(f'Dependency directory does not exist: {directory}')
+        suffixes = ANALYZABLE_SUFFIXES if directory in dependency_roots else HEADER_SUFFIXES
+        extra.update(path.resolve() for path in directory.rglob('*')
+                     if path.is_file() and path.suffix.lower() in suffixes)
+    all_files = sorted(set(all_files) | extra)
+    if compile_database is not None:
+        for entry in compile_database['entries']:
+            path = Path(entry['file'])
+            if path in extra and path.suffix.lower() in SOURCE_SUFFIXES:
+                compile_database['selected_sources'].append(entry)
     bundles = {path: cached_bundle(path, cache_dir) for path in all_files}
     header_roots = bundles[header]['declarations']
     structures = [copy.deepcopy(item) for bundle in bundles.values() for item in bundle['structures']]
     for item in structures:
-        item['id'] = str(Path(item['declaration']['file']).relative_to(project)) + ':' + str(item['start_byte'])
+        item['id'] = os.path.relpath(item['declaration']['file'], project) + ':' + str(item['start_byte'])
     entries = {Path(e['file']): e for e in (compile_database or {}).get('selected_sources', [])}
     contexts = {}
     missing_includes = []
     definitions = []
     for path in all_files:
         directories, forced = include_paths(entries.get(path), project)
+        directories.extend(include_dirs)
         visible = included_files(path, bundles, directories, forced, missing_includes)
         contexts[path] = visible
         if path.suffix == '.h':
@@ -495,7 +511,7 @@ def analyze(project, header, compile_commands=None, cache_dir=None, root_functio
                 if not detail:
                     continue
                 if included.suffix == '.h' and path.suffix == '.c' and detail['static']:
-                    detail['translation_unit'] = str(path.relative_to(project))
+                    detail['translation_unit'] = os.path.relpath(path, project)
                 elif included != path:
                     continue
                 detail['visible_files'] = [str(p) for p in visible]
@@ -510,7 +526,7 @@ def analyze(project, header, compile_commands=None, cache_dir=None, root_functio
         header_roots = requested
     by_name = defaultdict(list)
     for definition in definitions:
-        definition['file'] = str(Path(definition['file']).relative_to(project))
+        definition['file'] = os.path.relpath(definition['file'], project)
         definition['id'] = f"{definition['file']}:{definition['line']}:{definition['name']}"
         if definition.get('translation_unit'):
             definition['id'] += '@' + definition['translation_unit']
@@ -531,7 +547,7 @@ def analyze(project, header, compile_commands=None, cache_dir=None, root_functio
         definition['type_references'] = sorted(item['id'] for item in structures if (
             item['declaration']['file'] in visible and (
                 (item['name'] != '<anonymous>' and re.search(rf'\b{re.escape(item["name"])}\b', body)) or
-                (item['declaration']['file'] == str(project / definition['file']) and definition['start_byte'] <= item['start_byte'] < definition['end_byte'])
+                (item['declaration']['file'] == str((project / definition['file']).resolve()) and definition['start_byte'] <= item['start_byte'] < definition['end_byte'])
             )
         ))
 
@@ -598,10 +614,10 @@ def analyze(project, header, compile_commands=None, cache_dir=None, root_functio
             root_info.append({'name': name, 'definition': None, 'status': status, 'confidence': status, 'candidates': [item['id'] for item in target]})
     cycles = [sorted(component) for component in nx.strongly_connected_components(graph) if len(component) > 1]
     report = {'analyzer_version': ANALYZER_VERSION, 'project': str(project), 'header': str(header.relative_to(project)), 'roots': root_info, 'unresolved_calls': unresolved, 'ambiguous_calls': ambiguous, 'indirect_calls': indirect, 'definitions_indexed': len(definitions), 'files_indexed': len(all_files), 'structures': structures, 'cycles': cycles}
-    relevant = {str(header)} | {str(project / attrs['file']) for _, attrs in graph.nodes(data=True) if attrs.get('file')}
+    relevant = {str(header)} | {str((project / attrs['file']).resolve()) for _, attrs in graph.nodes(data=True) if attrs.get('file')}
     for path in list(relevant):
         relevant.update(str(value) for value in contexts.get(Path(path), set()))
-    report['unresolved_includes'] = list({(item['file'], item['include']): {**item, 'file': str(Path(item['file']).relative_to(project))} for item in missing_includes if item['file'] in relevant}.values())
+    report['unresolved_includes'] = list({(item['file'], item['include']): {**item, 'file': os.path.relpath(item['file'], project)} for item in missing_includes if item['file'] in relevant}.values())
     if compile_database is not None:
         report.update({'compile_commands': str(compile_database['path']), 'compile_commands_entries': len(compile_database['entries']), 'translation_units_selected': len(compile_database['selected_sources'])})
     return graph, report

@@ -1,6 +1,7 @@
 """Consolidate a scoped call graph before slices exist."""
 from pathlib import Path
 import sys
+import os
 
 from .store import MigrationError, digest, file_hash
 
@@ -32,20 +33,36 @@ def scoped_behavior(inventory, functions):
     return {fid: compact_behavior_function(graph, fid, graph.nodes[fid]) for fid in functions}
 
 
-def collect(source, headers, functions=None, compile_commands=None, cache=None):
+def source_snapshot(source, include_dirs=(), dependency_roots=()):
+    source = Path(source).resolve()
+    files = set()
+    for root, suffixes in [(source, {'.c', '.h'}),
+                           *[(Path(value), {'.h'}) for value in include_dirs],
+                           *[(Path(value), {'.c', '.h'}) for value in dependency_roots]]:
+        files.update(path.resolve() for path in root.rglob('*')
+                     if path.is_file() and path.suffix.lower() in suffixes)
+    return {os.path.relpath(path, source): file_hash(path) for path in sorted(files)}
+
+
+def collect(source, headers, functions=None, compile_commands=None, cache=None, include_dirs=None, dependency_roots=None):
     analyzer_dir = Path(__file__).resolve().parents[1] / 'header_dependency_analyzer'
     if str(analyzer_dir) not in sys.path:
         sys.path.insert(0, str(analyzer_dir))
     from export_inventory import merge_analyses
     from analyze import cached_bundle
     source = Path(source).resolve()
+    include_dirs = [str(Path(value).resolve()) for value in (include_dirs or [])]
+    dependency_roots = [str(Path(value).resolve()) for value in (dependency_roots or [])]
+    for directory in include_dirs + dependency_roots:
+        if not Path(directory).is_dir():
+            raise MigrationError(f'Dependency directory does not exist: {directory}')
     if not headers:
         headers = sorted(str(path.relative_to(source)) for path in source.rglob('*')
                          if path.is_file() and path.suffix.lower() == '.h')
         if not headers:
             raise MigrationError(f'No C header files found recursively under source root: {source}; provide --header explicitly')
     def snapshot():
-        return {str(p.relative_to(source)): file_hash(p) for p in sorted(source.rglob('*')) if p.is_file() and p.suffix in {'.c', '.h'}}
+        return source_snapshot(source, include_dirs, dependency_roots)
     before_files = snapshot()
     before_database = file_hash(compile_commands) if compile_commands else None
     headers = [(source / value).resolve() for value in headers]
@@ -53,7 +70,7 @@ def collect(source, headers, functions=None, compile_commands=None, cache=None):
     for header in headers:
         for item in cached_bundle(header, cache).get('function_declarations', []):
             prototypes.setdefault(item['name'], item)
-    graph, report = merge_analyses(source, headers, compile_commands, cache, functions)
+    graph, report = merge_analyses(source, headers, compile_commands, cache, functions, include_dirs, dependency_roots)
     identities = {}
     for node, attrs in graph.nodes(data=True):
         if attrs.get('status') == 'resolved':
@@ -91,5 +108,7 @@ def collect(source, headers, functions=None, compile_commands=None, cache=None):
     else:
         files_db = None
     payload = {'source_root': str(source), 'functions': dict(sorted(catalog.items())), 'roots': sorted(set(roots)), 'files': files, 'compile_commands': files_db, 'structures': list({s['id']: s for s in report['structures']}.values()), 'unresolved_includes': report['unresolved_includes']}
+    if include_dirs or dependency_roots:
+        payload.update(include_dirs=include_dirs, dependency_roots=dependency_roots)
     payload['fingerprint'] = digest(payload)
     return payload
